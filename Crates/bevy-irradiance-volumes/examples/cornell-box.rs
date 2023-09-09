@@ -4,16 +4,19 @@ use bevy::asset::FileAssetIo;
 use bevy::math::Vec3A;
 use bevy::prelude::{
     Added, AmbientLight, App, AssetPlugin, AssetServer, Assets, Camera3dBundle, Color, Commands,
-    Entity, Handle, Plugin, PluginGroup, Query, Res, ResMut, StandardMaterial, Startup, Transform,
-    Update, Vec3, Mat4, IVec3,
+    Entity, Handle, IVec3, Image, Mat4, Plugin, PluginGroup, Query, Res, ResMut, StandardMaterial,
+    Startup, Transform, Update, Vec3, Vec4,
 };
+use bevy::render::texture::{CompressedImageFormats, ImageType};
 use bevy::scene::SceneBundle;
 use bevy::DefaultPlugins;
 use bevy_egui::EguiPlugin;
-use bevy_irradiance_volumes::{IrradianceVolumeMaterial, IrradianceVolumesPlugin, GridData};
+use bevy_irradiance_volumes::{GridData, IrradianceVolumeMaterial, IrradianceVolumesPlugin};
 use bevy_view_controls_egui::{ControllableCamera, ViewControlsPlugin};
+use futures;
 use std::env;
-use std::path::PathBuf;
+use std::fs::File;
+use std::path::{Path, PathBuf};
 
 struct ExampleAssetIoPlugin;
 
@@ -41,7 +44,7 @@ fn main() {
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands
         .spawn(Camera3dBundle {
-            transform: Transform::from_xyz(0.0, 0.0, 3.0).looking_at(Vec3::ZERO, Vec3::Y),
+            transform: Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
             ..Camera3dBundle::default()
         })
         .insert(ControllableCamera {
@@ -51,33 +54,55 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 
     commands.spawn(SceneBundle {
         scene: asset_server.load("CornellBox.glb#Scene0"),
-        transform: Transform::from_scale(Vec3::splat(0.0038554997)),
+        transform: Transform::from_scale(Vec3::splat(0.2294848)),
         ..SceneBundle::default()
     });
 }
 
 fn replace_standard_materials(
     mut commands: Commands,
-    query: Query<Entity, Added<Handle<StandardMaterial>>>,
+    query: Query<(Entity, &Handle<StandardMaterial>)>,
     asset_server: Res<AssetServer>,
-    mut materials: ResMut<Assets<IrradianceVolumeMaterial>>,
+    standard_materials: ResMut<Assets<StandardMaterial>>,
+    mut irradiance_volume_materials: ResMut<Assets<IrradianceVolumeMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
-    for entity in query.iter() {
+    for (entity, standard_material) in query.iter() {
+        let Some(standard_material) = standard_materials.get(standard_material) else { continue };
+
+        let base_color = Vec4::from_slice(&standard_material.base_color.as_rgba_f32());
+
+        let data = futures::executor::block_on(
+            asset_server
+                .asset_io()
+                .load_path(Path::new("CornellBoxGrid.ktx2")),
+        )
+        .unwrap();
+        let image = Image::from_buffer(
+            &data,
+            ImageType::Extension("ktx2"),
+            CompressedImageFormats::NONE,
+            false,
+        )
+        .unwrap();
+        let irradiance_grid = images.add(image);
+
         commands
             .entity(entity)
             .remove::<Handle<StandardMaterial>>()
-            .insert(materials.add(IrradianceVolumeMaterial {
+            .insert(irradiance_volume_materials.add(IrradianceVolumeMaterial {
                 grid_data: GridData {
-                    matrix: Mat4::from_scale(Vec3::splat(0.0038554997)),
-                    resolution: IVec3::splat(4),
+                    matrix: Mat4::from_scale(Vec3::splat(0.2294848)),
+                    resolution: IVec3::splat(8),
                     offset: 1,
-                    corner: Vec3::splat(-194.52731),
-                    increment_x: Vec3::new(129.68488, 0.0, 0.0),
-                    increment_y: Vec3::new(0.0, 129.68488, 0.0),
+                    corner: Vec3::splat(-3.8128886),
+                    increment_x: Vec3::new(1.089397, 0.0, 0.0),
+                    increment_y: Vec3::new(0.0, 1.089397, 0.0),
                     level_bias: 1.0,
-                    increment_z: Vec3::new(0.0, 0.0, 129.68488),
+                    increment_z: Vec3::new(0.0, 0.0, 1.089397),
                 },
-                irradiance_grid: asset_server.load("CornellBoxGrid.ktx2"),
+                irradiance_grid,
+                base_color,
             }));
     }
 }

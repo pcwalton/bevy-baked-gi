@@ -81,6 +81,8 @@ fn write_ktx2(output: &mut File, texture_data: &[u8], dimensions: UVec3) -> Anyh
         0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A,
     ])?;
 
+    println!("dimensions={:?} size={:?}", dimensions, texture_data.len());
+
     for value in [
         VK_FORMAT_R8G8B8A8_UNORM, // vkFormat
         1,                        // typeSize

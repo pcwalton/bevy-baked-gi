@@ -1,6 +1,6 @@
 // bevy-irradiance-volumes/Crates/bevy-irradiance-volumes/src/lib.rs
 
-use bevy::prelude::{App, Handle, Image, Material, MaterialPlugin, Plugin, Mat4, IVec3, Vec3};
+use bevy::prelude::{App, Handle, Image, Material, MaterialPlugin, Plugin, Mat4, IVec3, Vec3, Vec4};
 use bevy::reflect::{Reflect, TypeUuid};
 use bevy::render::render_resource::{AsBindGroup, ShaderRef, ShaderType};
 
@@ -13,6 +13,8 @@ pub struct IrradianceVolumeMaterial {
     pub grid_data: GridData,
     #[texture(1, dimension = "3d")]
     pub irradiance_grid: Handle<Image>,
+    #[uniform(2)]
+    pub base_color: Vec4,
 }
 
 #[derive(Clone, Default, Reflect, Debug, ShaderType)]
