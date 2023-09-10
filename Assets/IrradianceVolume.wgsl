@@ -38,11 +38,11 @@ struct GridData {
 }
 
 @group(1) @binding(0)
-var<uniform> grid_data: GridData;
-@group(1) @binding(1)
-var irradiance_grid: texture_2d<f32>;
-@group(1) @binding(2)
 var<uniform> base_color: vec4<f32>;
+@group(3) @binding(0)
+var<uniform> grid_data: GridData;
+@group(3) @binding(1)
+var irradiance_grid: texture_2d<f32>;
 
 fn texel_fetch(st: vec2<i32>) -> vec4<f32> {
     return textureLoad(irradiance_grid, st, 0);

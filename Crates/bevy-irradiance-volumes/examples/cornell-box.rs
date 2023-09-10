@@ -11,7 +11,7 @@ use bevy::scene::SceneBundle;
 use bevy::DefaultPlugins;
 use bevy_egui::EguiPlugin;
 use bevy_irradiance_volumes::{
-    IrradianceVolume, IrradianceVolumeGpuData, IrradianceVolumesPlugin, StandardGiMaterial,
+    IrradianceVolume, IrradianceVolumeGpuData, IrradianceVolumesPlugin, PbrGiMaterial,
 };
 use bevy_view_controls_egui::{ControllableCamera, ViewControlsPlugin};
 use std::env;
@@ -71,7 +71,7 @@ fn replace_standard_materials(
     mut commands: Commands,
     query: Query<(Entity, &Handle<StandardMaterial>)>,
     standard_materials: ResMut<Assets<StandardMaterial>>,
-    mut irradiance_volume_materials: ResMut<Assets<StandardGiMaterial>>,
+    mut irradiance_volume_materials: ResMut<Assets<PbrGiMaterial>>,
 ) {
     for (entity, standard_material) in query.iter() {
         let Some(standard_material) = standard_materials.get(standard_material) else { continue };
@@ -81,11 +81,7 @@ fn replace_standard_materials(
         commands
             .entity(entity)
             .remove::<Handle<StandardMaterial>>()
-            .insert(irradiance_volume_materials.add(StandardGiMaterial {
-                grid_data: IrradianceVolumeGpuData::default(),
-                irradiance_grid: Handle::default(),
-                base_color,
-            }));
+            .insert(irradiance_volume_materials.add(PbrGiMaterial { base_color }));
     }
 }
 
