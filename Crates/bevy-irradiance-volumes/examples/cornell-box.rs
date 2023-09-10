@@ -3,20 +3,19 @@
 use bevy::asset::FileAssetIo;
 use bevy::math::Vec3A;
 use bevy::prelude::{
-    Added, AmbientLight, App, AssetPlugin, AssetServer, Assets, Camera3dBundle, Color, Commands,
-    Entity, Handle, IVec3, Image, Mat4, Plugin, PluginGroup, Query, Res, ResMut, StandardMaterial,
+    AmbientLight, App, AssetPlugin, AssetServer, Assets, Camera3dBundle, Color, Commands, Entity,
+    Handle, Name, Plugin, PluginGroup, Query, Res, ResMut, SpatialBundle, StandardMaterial,
     Startup, Transform, Update, Vec3, Vec4,
 };
-use bevy::render::texture::{CompressedImageFormats, ImageType};
 use bevy::scene::SceneBundle;
 use bevy::DefaultPlugins;
 use bevy_egui::EguiPlugin;
-use bevy_irradiance_volumes::{GridData, IrradianceVolumeMaterial, IrradianceVolumesPlugin};
+use bevy_irradiance_volumes::{
+    IrradianceVolume, IrradianceVolumeGpuData, IrradianceVolumesPlugin, StandardGiMaterial,
+};
 use bevy_view_controls_egui::{ControllableCamera, ViewControlsPlugin};
-use futures;
 use std::env;
-use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 struct ExampleAssetIoPlugin;
 
@@ -57,51 +56,34 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         transform: Transform::from_scale(Vec3::splat(0.2294848)),
         ..SceneBundle::default()
     });
+
+    // TODO: Add irradiance volume data.
+    commands
+        .spawn(SpatialBundle {
+            transform: Transform::from_scale(Vec3::splat(0.2294848)),
+            ..SpatialBundle::default()
+        })
+        .insert(Name::new("IrradianceVolume"))
+        .insert(asset_server.load::<IrradianceVolume, _>("CornellBox.voxelgi.bincode"));
 }
 
 fn replace_standard_materials(
     mut commands: Commands,
     query: Query<(Entity, &Handle<StandardMaterial>)>,
-    asset_server: Res<AssetServer>,
     standard_materials: ResMut<Assets<StandardMaterial>>,
-    mut irradiance_volume_materials: ResMut<Assets<IrradianceVolumeMaterial>>,
-    mut images: ResMut<Assets<Image>>,
+    mut irradiance_volume_materials: ResMut<Assets<StandardGiMaterial>>,
 ) {
     for (entity, standard_material) in query.iter() {
         let Some(standard_material) = standard_materials.get(standard_material) else { continue };
 
         let base_color = Vec4::from_slice(&standard_material.base_color.as_rgba_f32());
 
-        let data = futures::executor::block_on(
-            asset_server
-                .asset_io()
-                .load_path(Path::new("CornellBoxGrid.ktx2")),
-        )
-        .unwrap();
-        let image = Image::from_buffer(
-            &data,
-            ImageType::Extension("ktx2"),
-            CompressedImageFormats::NONE,
-            false,
-        )
-        .unwrap();
-        let irradiance_grid = images.add(image);
-
         commands
             .entity(entity)
             .remove::<Handle<StandardMaterial>>()
-            .insert(irradiance_volume_materials.add(IrradianceVolumeMaterial {
-                grid_data: GridData {
-                    matrix: Mat4::from_scale(Vec3::splat(0.2294848)),
-                    resolution: IVec3::splat(8),
-                    offset: 1,
-                    corner: Vec3::splat(-3.8128886),
-                    increment_x: Vec3::new(1.089397, 0.0, 0.0),
-                    increment_y: Vec3::new(0.0, 1.089397, 0.0),
-                    level_bias: 1.0,
-                    increment_z: Vec3::new(0.0, 0.0, 1.089397),
-                },
-                irradiance_grid,
+            .insert(irradiance_volume_materials.add(StandardGiMaterial {
+                grid_data: IrradianceVolumeGpuData::default(),
+                irradiance_grid: Handle::default(),
                 base_color,
             }));
     }

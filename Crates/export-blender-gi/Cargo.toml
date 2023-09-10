@@ -7,10 +7,14 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+bincode = "1"
 blend = "0.8"
 byteorder = "1"
 glam = "0.24"
 itertools = "0.11"
+
+[dependencies.bevy-irradiance-volumes]
+path = "../bevy-irradiance-volumes"
 
 [dependencies.clap]
 version = "4"
