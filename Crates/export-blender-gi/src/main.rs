@@ -90,6 +90,8 @@ fn main() {
         }
     }
 
+    println!("meta={:#?}", meta);
+
     let irradiance_volume = IrradianceVolume {
         meta,
         data: grid_sample_data,

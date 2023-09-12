@@ -2,7 +2,7 @@
 
 #![allow(clippy::type_complexity)]
 
-use bevy::asset::{AssetLoader, Error, LoadContext, LoadedAsset};
+use bevy::asset::{AssetLoader, AssetPath, Error, LoadContext, LoadedAsset};
 use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d, Transparent3d};
 use bevy::core_pipeline::experimental::taa::TemporalAntiAliasSettings;
 use bevy::core_pipeline::prepass::NormalPrepass;
@@ -10,6 +10,7 @@ use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::ecs::query::ROQueryItem;
 use bevy::ecs::system::lifetimeless::Read;
 use bevy::ecs::system::SystemParamItem;
+use bevy::gltf::{GltfError, GltfExtras, GltfLoader, GltfMesh};
 use bevy::math::ivec2;
 use bevy::pbr::{
     self, DrawMesh, DrawPrepass, ExtractedMaterials, MaterialPipeline, MaterialPipelineKey,
@@ -18,14 +19,15 @@ use bevy::pbr::{
     SetMeshViewBindGroup, Shadow,
 };
 use bevy::prelude::{
-    error, info, warn, AddAsset, AlphaMode, App, AssetEvent, Assets, Changed, Commands, Component,
-    Entity, EnvironmentMapLight, EventReader, FromWorld, GlobalTransform, Handle, IVec2, IVec3,
-    Image, IntoSystemConfigs, Mat4, Material, Mesh, Msaa, Or, Plugin, PostUpdate, Query, Res,
-    ResMut, Resource, Vec3, Vec4, With, World,
+    error, info, warn, AddAsset, AlphaMode, App, AssetEvent, AssetServer, Assets, Changed,
+    Children, Commands, Component, Entity, EnvironmentMapLight, EventReader, FromWorld,
+    GlobalTransform, Handle, IVec2, IVec3, Image, IntoSystemConfigs, Mat4, Material, Mesh, Msaa,
+    Or, Plugin, PostUpdate, Query, Res, ResMut, Resource, StandardMaterial, Update, Vec3, Vec4,
+    With, Without, World,
 };
 use bevy::reflect::{Reflect, TypeUuid};
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
-use bevy::render::mesh::MeshVertexBufferLayout;
+use bevy::render::mesh::{MeshVertexAttribute, MeshVertexBufferLayout};
 use bevy::render::render_asset::{PrepareAssetSet, RenderAssets};
 use bevy::render::render_phase::{
     AddRenderCommand, DrawFunctions, PhaseItem, RenderCommand, RenderCommandResult, RenderPhase,
@@ -34,16 +36,19 @@ use bevy::render::render_phase::{
 use bevy::render::render_resource::{
     AsBindGroup, BindGroupLayout, PipelineCache, PreparedBindGroup, RenderPipelineDescriptor,
     ShaderRef, ShaderType, SpecializedMeshPipeline, SpecializedMeshPipelineError,
-    SpecializedMeshPipelines,
+    SpecializedMeshPipelines, VertexFormat,
 };
 use bevy::render::renderer::RenderDevice;
-use bevy::render::texture::FallbackImage;
+use bevy::render::texture::{CompressedImageFormats, FallbackImage};
 use bevy::render::view::{ExtractedView, VisibleEntities};
 use bevy::render::{ExtractSchedule, Render, RenderApp, RenderSet};
 use bevy::transform::TransformSystem;
-use bevy::utils::BoxedFuture;
+use bevy::utils::{BoxedFuture, HashMap};
+use gltf::buffer::Source;
+use gltf::{Gltf as GGltf, Mesh as GMesh, Primitive, Semantic};
 use image::{DynamicImage, ImageBuffer};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[doc(hidden)]
 pub const IRRADIANCE_GRID_BYTES_PER_SAMPLE: usize = 4;
@@ -53,7 +58,13 @@ pub const IRRADIANCE_GRID_SAMPLES_PER_CELL: usize = 6;
 pub const IRRADIANCE_GRID_BYTES_PER_CELL: usize =
     IRRADIANCE_GRID_BYTES_PER_SAMPLE * IRRADIANCE_GRID_SAMPLES_PER_CELL;
 
-pub struct IrradianceVolumesPlugin;
+pub static LIGHTMAP_UV_ATTRIBUTE: MeshVertexAttribute =
+    MeshVertexAttribute::new("LightmapUv", 0xbe293e1f, VertexFormat::Float32x2);
+
+#[derive(Default)]
+pub struct IrradianceVolumesPlugin {
+    pub custom_vertex_attributes: HashMap<String, MeshVertexAttribute>,
+}
 
 /// The asset that defines an irradiance volume.
 #[derive(Clone, Default, Reflect, Debug, TypeUuid, Serialize, Deserialize)]
@@ -80,18 +91,27 @@ pub struct IrradianceVolumeAssetLoader;
 pub struct PbrGiMaterial {
     #[uniform(0)]
     pub base_color: Vec4,
+    #[texture(1)]
+    #[sampler(2)]
+    pub base_color_texture: Option<Handle<Image>>,
 }
 
-#[derive(Clone, Component, ExtractComponent, AsBindGroup)]
-pub struct ComputedIrradianceVolumeData {
+#[derive(Clone, Component, ExtractComponent, AsBindGroup, Reflect)]
+pub struct ComputedGlobalIllumination {
     #[uniform(0)]
-    pub grid_data: IrradianceVolumeGpuData,
+    pub irradiance_volume_descriptor: IrradianceVolumeDescriptor,
     #[texture(1)]
-    pub irradiance_grid: Handle<Image>,
+    pub irradiance_volume_texture: Option<Handle<Image>>,
+    #[texture(2)]
+    #[sampler(3)]
+    pub lightmap: Option<Handle<Image>>,
 }
+
+#[derive(Clone, Component, Reflect)]
+pub struct Lightmap(pub Handle<Image>);
 
 #[derive(Clone, Default, Reflect, Debug, ShaderType)]
-pub struct IrradianceVolumeGpuData {
+pub struct IrradianceVolumeDescriptor {
     pub meta: IrradianceVolumeMetadata,
     pub transform: Mat4,
     pub offset: i32,
@@ -100,7 +120,7 @@ pub struct IrradianceVolumeGpuData {
 #[derive(Resource, Clone)]
 pub struct IrradianceGrid {
     texture: Option<Handle<Image>>,
-    gpu_data: Vec<IrradianceVolumeGpuData>,
+    gpu_data: Vec<IrradianceVolumeDescriptor>,
 }
 
 pub struct SetIrradianceVolumeDataBindGroup<const I: usize>;
@@ -123,17 +143,33 @@ pub struct PbrGiMaterialPipeline {
     irradiance_volume_data_bind_group_layout: BindGroupLayout,
 }
 
+#[derive(TypeUuid, Reflect)]
+#[uuid = "df95f00d-3deb-40b3-a3fd-7c4bfc788228"]
+struct LightmapUvs {
+    mesh_handle: Handle<Mesh>,
+    uvs: Vec<[f32; 2]>,
+}
+
+pub struct LightmappedGltfAssetLoader {
+    gltf_loader: GltfLoader,
+}
+
 impl Plugin for IrradianceVolumesPlugin {
     fn build(&self, app: &mut App) {
+        // TODO: glTF instantiation should be optional.
         app.register_type::<IrradianceVolume>()
             .register_type::<PbrGiMaterial>()
             .register_type::<IrradianceVolumeMetadata>()
+            .register_type::<ComputedGlobalIllumination>()
+            .register_type::<Lightmap>()
             .add_asset::<IrradianceVolume>()
             .add_asset::<PbrGiMaterial>()
+            .add_asset::<LightmapUvs>()
             .add_asset_loader(IrradianceVolumeAssetLoader)
+            .preregister_asset_loader(&["gi.gltf", "gi.glb"])
             .init_resource::<IrradianceGrid>()
             .add_plugins(ExtractComponentPlugin::<Handle<PbrGiMaterial>>::extract_visible())
-            .add_plugins(ExtractComponentPlugin::<ComputedIrradianceVolumeData>::extract_visible())
+            .add_plugins(ExtractComponentPlugin::<ComputedGlobalIllumination>::extract_visible())
             .add_plugins(PrepassPipelinePlugin::<PbrGiMaterial>::default())
             .add_plugins(PrepassPlugin::<PbrGiMaterial>::default())
             .add_systems(
@@ -142,8 +178,11 @@ impl Plugin for IrradianceVolumesPlugin {
             )
             .add_systems(
                 PostUpdate,
-                write_irradiance_grid_to_materials.after(update_irradiance_grid),
-            );
+                compute_global_illumination.after(update_irradiance_grid),
+            )
+            .add_systems(Update, instantiate_lightmaps_in_gltf)
+            .add_systems(Update, handle_newly_added_lightmap_uvs)
+            .add_systems(Update, upgrade_standard_materials_for_irradiance_volumes);
 
         let Ok(render_app) = app.get_sub_app_mut(RenderApp) else { return };
         render_app
@@ -178,10 +217,29 @@ impl Plugin for IrradianceVolumesPlugin {
                 .init_resource::<MaterialPipeline<PbrGiMaterial>>()
                 .init_resource::<PbrGiMaterialPipeline>();
         }
+
+        // This is copy-and-pasted from `GltfPlugin::finish()`.
+
+        let supported_compressed_formats = match app.world.get_resource::<RenderDevice>() {
+            Some(render_device) => CompressedImageFormats::from_features(render_device.features()),
+            None => CompressedImageFormats::NONE,
+        };
+
+        app.add_asset_loader(LightmappedGltfAssetLoader {
+            gltf_loader: GltfLoader {
+                supported_compressed_formats,
+                custom_vertex_attributes: self.custom_vertex_attributes.clone(),
+            },
+        });
     }
 }
 
 impl Material for PbrGiMaterial {
+    fn vertex_shader() -> ShaderRef {
+        // TODO: Use `include_bytes!` instead.
+        "IrradianceVolume.wgsl".into()
+    }
+
     fn fragment_shader() -> ShaderRef {
         // TODO: Use `include_bytes!` instead.
         "IrradianceVolume.wgsl".into()
@@ -197,6 +255,38 @@ impl SpecializedMeshPipeline for PbrGiMaterialPipeline {
         layout: &MeshVertexBufferLayout,
     ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
         let mut descriptor = self.material_pipeline.specialize(key, layout)?;
+
+        // This is copy-and-pasted from `bevy_pbr::render::mesh::MeshPipeline::specialize`.
+        let mut vertex_attributes = vec![];
+        if layout.contains(Mesh::ATTRIBUTE_POSITION) {
+            vertex_attributes.push(Mesh::ATTRIBUTE_POSITION.at_shader_location(0));
+        }
+        if layout.contains(Mesh::ATTRIBUTE_NORMAL) {
+            vertex_attributes.push(Mesh::ATTRIBUTE_NORMAL.at_shader_location(1));
+        }
+        if layout.contains(Mesh::ATTRIBUTE_UV_0) {
+            vertex_attributes.push(Mesh::ATTRIBUTE_UV_0.at_shader_location(2));
+        }
+        if layout.contains(Mesh::ATTRIBUTE_TANGENT) {
+            vertex_attributes.push(Mesh::ATTRIBUTE_TANGENT.at_shader_location(3));
+        }
+        if layout.contains(Mesh::ATTRIBUTE_COLOR) {
+            vertex_attributes.push(Mesh::ATTRIBUTE_COLOR.at_shader_location(4));
+        }
+        if layout.contains(LIGHTMAP_UV_ATTRIBUTE.clone()) {
+            descriptor
+                .vertex
+                .shader_defs
+                .push("VERTEX_LIGHTMAP_UVS".into());
+            if let Some(ref mut fragment) = descriptor.fragment {
+                fragment.shader_defs.push("VERTEX_LIGHTMAP_UVS".into());
+            }
+
+            vertex_attributes.push(LIGHTMAP_UV_ATTRIBUTE.at_shader_location(5));
+        }
+
+        let vertex_layout = layout.get_layout(&vertex_attributes).unwrap();
+        descriptor.vertex.buffers = vec![vertex_layout];
 
         debug_assert_eq!(descriptor.layout.len(), 3);
         descriptor
@@ -259,11 +349,13 @@ fn update_irradiance_grid(
         let Some(irradiance_volume) =
             irradiance_volume_assets.get(irradiance_volume_handle) else { continue };
 
-        new_gpu_data.push(IrradianceVolumeGpuData {
+        new_gpu_data.push(IrradianceVolumeDescriptor {
             meta: irradiance_volume.meta.clone(),
             transform: transform.compute_matrix(),
             offset: current_offset,
         });
+
+        println!("{:#?}", irradiance_volume.meta);
 
         irradiance_volume_handles.push(irradiance_volume_handle.clone());
 
@@ -336,22 +428,23 @@ fn update_irradiance_grid(
     }
 }
 
-fn write_irradiance_grid_to_materials(
+fn compute_global_illumination(
     mut commands: Commands,
     irradiance_grid: Res<IrradianceGrid>,
-    mut entities_query: Query<Entity, With<Handle<PbrGiMaterial>>>,
+    mut entities_query: Query<(Entity, Option<&Lightmap>), With<Handle<PbrGiMaterial>>>,
 ) {
-    let Some(ref texture) = irradiance_grid.texture else { return };
     // FIXME: Check distance, fill in appropriately.
-    let Some(gpu_data) = irradiance_grid.gpu_data.get(0) else { return };
 
-    for entity in entities_query.iter_mut() {
-        commands
-            .entity(entity)
-            .insert(ComputedIrradianceVolumeData {
-                grid_data: (*gpu_data).clone(),
-                irradiance_grid: (*texture).clone(),
-            });
+    for (entity, maybe_lightmap) in entities_query.iter_mut() {
+        commands.entity(entity).insert(ComputedGlobalIllumination {
+            irradiance_volume_descriptor: irradiance_grid
+                .gpu_data
+                .get(0)
+                .cloned()
+                .unwrap_or_default(),
+            irradiance_volume_texture: irradiance_grid.texture.clone(),
+            lightmap: maybe_lightmap.map(|lightmap| lightmap.0.clone()),
+        });
     }
 }
 
@@ -377,7 +470,7 @@ where
 {
     type Param = ();
     type ViewWorldQuery = ();
-    type ItemWorldQuery = Read<RenderIrradianceVolumeData>;
+    type ItemWorldQuery = Option<Read<RenderIrradianceVolumeData>>;
 
     #[inline]
     fn render<'w>(
@@ -387,14 +480,19 @@ where
         _: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        pass.set_bind_group(I, &entity.0.bind_group, &[]);
-        RenderCommandResult::Success
+        match entity {
+            None => RenderCommandResult::Failure,
+            Some(irradiance_data) => {
+                pass.set_bind_group(I, &irradiance_data.0.bind_group, &[]);
+                RenderCommandResult::Success
+            }
+        }
     }
 }
 
 pub fn prepare_irradiance_volumes(
     mut commands: Commands,
-    query: Query<(Entity, &ComputedIrradianceVolumeData)>,
+    query: Query<(Entity, &ComputedGlobalIllumination)>,
     pipeline: Res<PbrGiMaterialPipeline>,
     render_device: Res<RenderDevice>,
     images: Res<RenderAssets<Image>>,
@@ -606,10 +704,225 @@ impl FromWorld for PbrGiMaterialPipeline {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
         let irradiance_volume_data_bind_group_layout =
-            ComputedIrradianceVolumeData::bind_group_layout(render_device);
+            ComputedGlobalIllumination::bind_group_layout(render_device);
         PbrGiMaterialPipeline {
             material_pipeline: MaterialPipeline::from_world(world),
             irradiance_volume_data_bind_group_layout,
         }
     }
+}
+
+pub fn instantiate_lightmaps_in_gltf(
+    mut commands: Commands,
+    mut gltf_extras_query: Query<
+        (Entity, &Children, &mut GltfExtras),
+        Without<Handle<PbrGiMaterial>>,
+    >,
+    standard_material_query: Query<(
+        &Handle<StandardMaterial>,
+        Option<&Handle<Mesh>>,
+        Option<&Handle<GltfMesh>>,
+    )>,
+    asset_server: ResMut<AssetServer>,
+    standard_material_assets: Res<Assets<StandardMaterial>>,
+    mesh_assets: Res<Assets<Mesh>>,
+    mut pbr_gi_material_assets: ResMut<Assets<PbrGiMaterial>>,
+) {
+    for (entity, children, gltf_extras) in gltf_extras_query.iter_mut() {
+        let Ok(Value::Object(gltf_extras)) =
+            serde_json::from_str(&gltf_extras.value) else { continue };
+        let Some(Value::String(lightmap_path)) = gltf_extras.get("Lightmap") else { continue };
+        let lightmap = asset_server.load(lightmap_path);
+
+        /*
+        commands.entity(entity).add(move |id, world: &mut World| {
+            let mut entity = entity;
+            loop {
+                for component in world.entity(entity).archetype().components() {
+                    println!("component {:?}", world.components().get_name(component));
+                }
+                println!("----");
+                let Some(parent) = world.entity(entity).get::<Parent>() else { break };
+                entity = parent.get();
+            }
+        });
+        */
+
+        for &kid in children.iter() {
+            let Ok((standard_material_handle, mesh_handle, gltf_mesh_handle)) =
+                standard_material_query.get(kid) else { continue };
+            let Some(standard_material) =
+                standard_material_assets.get(standard_material_handle) else { continue };
+
+            /*
+            println!(
+                "have mesh? {:?} have gltf mesh? {:?}",
+                mesh_handle.is_some(),
+                gltf_mesh_handle.is_some()
+            );
+            */
+
+            // TODO: Cache and reuse these!
+            let new_pbr_gi_material = pbr_gi_material_assets.add(PbrGiMaterial {
+                base_color: standard_material.base_color.as_rgba_f32().into(),
+                base_color_texture: standard_material.base_color_texture.clone(),
+            });
+
+            commands
+                .entity(kid)
+                .remove::<Handle<StandardMaterial>>()
+                .insert(new_pbr_gi_material)
+                .insert(Lightmap(lightmap.clone()));
+
+            /*
+            commands.entity(kid).add(move |id, world: &mut World| {
+                for component in world.entity(kid).archetype().components() {
+                    println!("component {:?}", world.components().get_name(component));
+                }
+            });
+            */
+
+            info!(
+                "Instantiated standard material with lightmap: {}",
+                lightmap_path
+            );
+        }
+    }
+}
+
+pub fn upgrade_standard_materials_for_irradiance_volumes(
+    mut commands: Commands,
+    irradiance_volume_query: Query<Entity, With<Handle<IrradianceVolume>>>,
+    material_query: Query<(Entity, &Handle<StandardMaterial>)>,
+    standard_material_assets: Res<Assets<StandardMaterial>>,
+    mut pbr_gi_material_assets: ResMut<Assets<PbrGiMaterial>>,
+) {
+    if irradiance_volume_query.is_empty() {
+        return;
+    }
+
+    for (entity, standard_material_handle) in material_query.iter() {
+        let Some(standard_material) =
+            standard_material_assets.get(standard_material_handle) else { continue };
+
+        let new_pbr_gi_material = pbr_gi_material_assets.add(PbrGiMaterial {
+            base_color: standard_material.base_color.as_rgba_f32().into(),
+            base_color_texture: standard_material.base_color_texture.clone(),
+        });
+
+        commands
+            .entity(entity)
+            .remove::<Handle<StandardMaterial>>()
+            .insert(new_pbr_gi_material);
+
+        info!("Upgraded standard material");
+    }
+}
+
+// Copy-and-pasted from `bevy_gltf::loader`.
+fn primitive_label(mesh: &GMesh, primitive: &Primitive) -> String {
+    format!("Mesh{}/Primitive{}", mesh.index(), primitive.index())
+}
+
+impl AssetLoader for LightmappedGltfAssetLoader {
+    fn load<'a>(
+        &'a self,
+        bytes: &'a [u8],
+        load_context: &'a mut LoadContext,
+    ) -> BoxedFuture<'a, Result<(), Error>> {
+        Box::pin(async move {
+            self.gltf_loader.load(bytes, load_context).await?;
+
+            let gltf = GGltf::from_slice(bytes)?;
+            let buffer_data = load_buffers(&gltf).await?;
+
+            for gltf_mesh in gltf.meshes() {
+                for gltf_primitive in gltf_mesh.primitives() {
+                    let primitive_label = primitive_label(&gltf_mesh, &gltf_primitive);
+                    let mesh_handle = load_context.get_handle(AssetPath::new_ref(
+                        load_context.path(),
+                        Some(&*primitive_label),
+                    ));
+                    for (semantic, _) in gltf_primitive.attributes() {
+                        if semantic != Semantic::TexCoords(1) {
+                            continue;
+                        }
+
+                        let Some(tex_coords) = gltf_primitive.reader(|buffer| {
+                            Some(&buffer_data[buffer.index()])
+                        }).read_tex_coords(1) else {
+                            warn!("Failed to read texture coordinates");
+                            continue;
+                        };
+
+                        load_context.set_labeled_asset(
+                            &format!("{}/LightmapUV", primitive_label),
+                            LoadedAsset::new(LightmapUvs {
+                                mesh_handle: mesh_handle.clone(),
+                                uvs: tex_coords.into_f32().collect::<Vec<_>>(),
+                            }),
+                        );
+
+                        info!(
+                            "Loaded lightmap UVs: {}: {}",
+                            load_context.path().display(),
+                            primitive_label
+                        );
+                    }
+                }
+            }
+
+            Ok(())
+        })
+    }
+
+    fn extensions(&self) -> &[&str] {
+        static EXTENSIONS: [&str; 2] = ["gi.gltf", "gi.glb"];
+        &EXTENSIONS
+    }
+}
+
+fn handle_newly_added_lightmap_uvs(
+    mut lightmap_uv_events: EventReader<AssetEvent<LightmapUvs>>,
+    lightmap_uvs_assets: Res<Assets<LightmapUvs>>,
+    mut mesh_assets: ResMut<Assets<Mesh>>,
+) {
+    for asset_event in lightmap_uv_events.into_iter() {
+        let lightmap_uvs_handle = match asset_event {
+            AssetEvent::Created { handle } | AssetEvent::Modified { handle } => (*handle).clone(),
+            AssetEvent::Removed { .. } => continue,
+        };
+
+        let Some(lightmap_uvs) = lightmap_uvs_assets.get(&lightmap_uvs_handle) else { continue };
+
+        let Some(mesh) = mesh_assets.get_mut(&lightmap_uvs.mesh_handle) else {
+            error!("Didn't find the mesh");
+            continue;
+        };
+
+        mesh.insert_attribute(LIGHTMAP_UV_ATTRIBUTE.clone(), lightmap_uvs.uvs.clone());
+        info!("Copied lightmap UVs");
+    }
+}
+
+/// Loads the raw glTF buffer data for a specific glTF file.
+async fn load_buffers(gltf: &GGltf) -> Result<Vec<Vec<u8>>, GltfError> {
+    let mut buffer_data = Vec::new();
+    for buffer in gltf.buffers() {
+        match buffer.source() {
+            Source::Uri(_) => {
+                warn!("URIs for lightmap UVs are currently unsupported");
+                return Err(GltfError::MissingBlob);
+            }
+            Source::Bin => {
+                if let Some(blob) = gltf.blob.as_deref() {
+                    buffer_data.push(blob.into());
+                } else {
+                    return Err(GltfError::MissingBlob);
+                }
+            }
+        }
+    }
+
+    Ok(buffer_data)
 }

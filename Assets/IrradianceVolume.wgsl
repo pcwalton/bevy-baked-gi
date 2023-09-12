@@ -5,8 +5,8 @@
 #import bevy_pbr::pbr_types as pbr_types
 #import bevy_pbr::prepass_utils
 
-#import bevy_pbr::mesh_vertex_output       MeshVertexOutput
 #import bevy_pbr::mesh_bindings            mesh
+#import bevy_pbr::mesh_functions           mesh_position_local_to_clip, mesh_position_local_to_world, mesh_normal_local_to_world
 #import bevy_pbr::mesh_view_bindings       view, fog, screen_space_ambient_occlusion_texture
 #import bevy_pbr::mesh_view_types          FOG_MODE_OFF
 #import bevy_core_pipeline::tonemapping    screen_space_dither, powsafe, tone_mapping
@@ -17,6 +17,31 @@
 #ifdef SCREEN_SPACE_AMBIENT_OCCLUSION
 #import bevy_pbr::gtao_utils gtao_multibounce
 #endif
+
+struct Vertex {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+#ifdef VERTEX_LIGHTMAP_UVS
+    @location(5) lightmap_uv: vec2<f32>,
+#endif
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) world_position: vec4<f32>,
+    @location(1) world_normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+#ifdef VERTEX_TANGENTS
+    @location(3) world_tangent: vec4<f32>,
+#endif
+#ifdef VERTEX_COLORS
+    @location(4) color: vec4<f32>,
+#endif
+#ifdef VERTEX_LIGHTMAP_UVS
+    @location(5) lightmap_uv: vec2<f32>,
+#endif
+};
 
 struct IrradianceData {
     cubesides: array<vec3<f32>, 3>,
@@ -39,10 +64,18 @@ struct GridData {
 
 @group(1) @binding(0)
 var<uniform> base_color: vec4<f32>;
+@group(1) @binding(1)
+var base_color_texture: texture_2d<f32>;
+@group(1) @binding(2)
+var base_color_sampler: sampler;
 @group(3) @binding(0)
 var<uniform> grid_data: GridData;
 @group(3) @binding(1)
 var irradiance_grid: texture_2d<f32>;
+@group(3) @binding(2)
+var lightmap_texture: texture_2d<f32>;
+@group(3) @binding(3)
+var lightmap_sampler: sampler;
 
 fn texel_fetch(st: vec2<i32>) -> vec4<f32> {
     return textureLoad(irradiance_grid, st, 0);
@@ -90,22 +123,23 @@ fn eevee_irradiance_from_cell_get(cell: i32, ir_dir: vec3<f32>) -> vec3<f32> {
     return eevee_compute_irradiance(ir_dir, ir_data.cubesides);
 }
 
-@fragment
-fn fragment(mesh: MeshVertexOutput) -> @location(0) vec4<f32> {
-    let P = to_blender_coords(mesh.world_position.xyz);
-    let N = normalize(to_blender_coords(mesh.world_normal.xyz));
+fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    let P = to_blender_coords(p);
+    let N = normalize(to_blender_coords(n));
 
-    let corner = (grid_data.transform * vec4(grid_data.metadata.corner, 1.0)).xyz;
+    let corner = vec4(grid_data.metadata.corner, 1.0).xyz;
     let increment = vec3(
-        (grid_data.transform * vec4(grid_data.metadata.increment_x, 1.0)).x,
-        (grid_data.transform * vec4(grid_data.metadata.increment_y, 1.0)).y,
-        (grid_data.transform * vec4(grid_data.metadata.increment_z, 1.0)).z,
+        vec4(grid_data.metadata.increment_x, 1.0).x,
+        vec4(grid_data.metadata.increment_y, 1.0).y,
+        vec4(grid_data.metadata.increment_z, 1.0).z,
     );
 
     var localpos = (P - corner) / increment;
 
     let localpos_floored = floor(localpos);
     let trilinear_weight = fract(localpos);
+
+    //return localpos_floored / vec3<f32>(grid_data.metadata.resolution);
 
     var weight_accum = 0.0;
     var irradiance_accum = vec3(0.0);
@@ -139,7 +173,7 @@ fn fragment(mesh: MeshVertexOutput) -> @location(0) vec4<f32> {
 
         let trilinear = mix(1.0 - trilinear_weight, trilinear_weight, vec3<f32>(offset));
         if (trilinear.x < 0.0 || trilinear.y < 0.0 || trilinear.z < 0.0) {
-            return vec4(1.0, 0.0, 0.0, 1.0);
+            return vec3(1.0, 0.0, 0.0);
         }
         weight *= trilinear.x * trilinear.y * trilinear.z;
 
@@ -149,8 +183,34 @@ fn fragment(mesh: MeshVertexOutput) -> @location(0) vec4<f32> {
         irradiance_accum += color * weight;
     }
 
-    let rgb = (irradiance_accum / weight_accum);
-    return base_color * vec4(rgb, 1.0);
+    let rgb: vec3<f32> = irradiance_accum / weight_accum;
+    return rgb;
+}
+
+@vertex
+fn vertex(vertex: Vertex) -> VertexOutput {
+    var model = mesh.model;
+
+    var out: VertexOutput;
+    out.position = mesh_position_local_to_clip(mesh.model, vec4<f32>(vertex.position, 1.0));
+    out.world_position = mesh_position_local_to_world(model, vec4<f32>(vertex.position, 1.0));
+    out.world_normal = mesh_normal_local_to_world(vertex.normal);
+    out.uv = vertex.uv;
+#ifdef VERTEX_LIGHTMAP_UVS
+    out.lightmap_uv = vertex.lightmap_uv;
+#endif
+    return out;
+}
+
+@fragment
+fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
+    var color = base_color;
+    color *= textureSample(base_color_texture, base_color_sampler, mesh.uv);
+#ifdef VERTEX_LIGHTMAP_UVS
+    //color *= textureSample(lightmap_texture, lightmap_sampler, mesh.lightmap_uv);
+#endif
+    color = vec4(color.rgb * eevee_sample_irradiance_volume(mesh.world_position.xyz, mesh.world_normal), color.a);
+    return color;
 }
 
 /*

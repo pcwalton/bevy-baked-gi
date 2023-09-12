@@ -1,18 +1,15 @@
-// bevy-irradiance-volumes/Crates/bevy-irradiance-volumes/examples/cornell-box.rs
+// bevy-irradiance-volumes/Crates/bevy-irradiance-volumes/examples/scene.rs
 
 use bevy::asset::FileAssetIo;
-use bevy::math::Vec3A;
+use bevy::math::{vec3, Vec3A};
 use bevy::prelude::{
-    AmbientLight, App, AssetPlugin, AssetServer, Assets, Camera3dBundle, Color, Commands, Entity,
-    Handle, Name, Plugin, PluginGroup, Query, Res, ResMut, SpatialBundle, StandardMaterial,
-    Startup, Transform, Update, Vec3, Vec4,
+    AmbientLight, App, AssetPlugin, AssetServer, Camera3dBundle, Color, Commands, Name, Plugin,
+    PluginGroup, Res, SpatialBundle, Startup, Transform, Update, Vec3,
 };
 use bevy::scene::SceneBundle;
 use bevy::DefaultPlugins;
 use bevy_egui::EguiPlugin;
-use bevy_irradiance_volumes::{
-    IrradianceVolume, IrradianceVolumeGpuData, IrradianceVolumesPlugin, PbrGiMaterial,
-};
+use bevy_irradiance_volumes::{IrradianceVolume, IrradianceVolumesPlugin};
 use bevy_view_controls_egui::{ControllableCamera, ViewControlsPlugin};
 use std::env;
 use std::path::PathBuf;
@@ -32,18 +29,21 @@ fn main() {
         )
         .add_plugins(EguiPlugin)
         .add_plugins(ViewControlsPlugin)
-        .add_plugins(IrradianceVolumesPlugin)
+        .add_plugins(IrradianceVolumesPlugin::default())
         .add_systems(Startup, setup)
         .add_systems(Startup, bevy_view_controls_egui::simple_setup)
         .add_systems(Update, bevy_view_controls_egui::simple_view_controls)
-        .add_systems(Update, replace_standard_materials)
         .run();
 }
 
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let scene_name = env::args()
+        .nth(1)
+        .unwrap_or_else(|| "CornellBox.glb".to_owned());
+
     commands
         .spawn(Camera3dBundle {
-            transform: Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+            transform: Transform::from_xyz(0.0, 0.0, 3.0).looking_at(Vec3::ZERO, Vec3::Y),
             ..Camera3dBundle::default()
         })
         .insert(ControllableCamera {
@@ -52,37 +52,20 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         });
 
     commands.spawn(SceneBundle {
-        scene: asset_server.load("CornellBox.glb#Scene0"),
-        transform: Transform::from_scale(Vec3::splat(0.2294848)),
+        scene: asset_server.load(format!("{}#Scene0", scene_name)),
+        transform: Transform::IDENTITY,
         ..SceneBundle::default()
     });
 
-    // TODO: Add irradiance volume data.
+    // FIXME: Export a `scn.ron` from `export-blender-gi`.
     commands
         .spawn(SpatialBundle {
-            transform: Transform::from_scale(Vec3::splat(0.2294848)),
+            transform: Transform::from_scale(vec3(0.012931285, 0.008930373, 0.012931285))
+                .with_translation(vec3(0.0, -0.041710883, -0.81668377)),
             ..SpatialBundle::default()
         })
         .insert(Name::new("IrradianceVolume"))
-        .insert(asset_server.load::<IrradianceVolume, _>("CornellBox.voxelgi.bincode"));
-}
-
-fn replace_standard_materials(
-    mut commands: Commands,
-    query: Query<(Entity, &Handle<StandardMaterial>)>,
-    standard_materials: ResMut<Assets<StandardMaterial>>,
-    mut irradiance_volume_materials: ResMut<Assets<PbrGiMaterial>>,
-) {
-    for (entity, standard_material) in query.iter() {
-        let Some(standard_material) = standard_materials.get(standard_material) else { continue };
-
-        let base_color = Vec4::from_slice(&standard_material.base_color.as_rgba_f32());
-
-        commands
-            .entity(entity)
-            .remove::<Handle<StandardMaterial>>()
-            .insert(irradiance_volume_materials.add(PbrGiMaterial { base_color }));
-    }
+        .insert(asset_server.load::<IrradianceVolume, _>("Sponza.voxelgi.bincode"));
 }
 
 impl Plugin for ExampleAssetIoPlugin {
