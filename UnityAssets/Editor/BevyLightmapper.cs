@@ -1,16 +1,27 @@
 // bevy-baked-gi/UnityAssets/Editor/BevyLightmapper.cs
 
 using C;
+using SharpGLTF.Geometry.VertexTypes;
+using SharpGLTF.IO;
+using SharpGLTF.Schema2;
+using Siccity.GLTFUtility;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Numerics;
 using System.Text;
-using Unity.Collections;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEditor;
 
 namespace Bevy.Lightmapper
 {
+internal class GameObjectLightmapInfo {
+    public UnityEngine.Mesh Mesh;
+    public int LightmapIndex;
+}
+
 public class LightmapperUI : EditorWindow
 {
     private string mInputFilePath;
@@ -140,6 +151,17 @@ public class LightmapperUI : EditorWindow
 
         GUILayout.EndHorizontal();
 
+        // Import glTF button
+
+        if (GUILayout.Button("Import glTF")) {
+            ImportGLTF();
+        }
+
+        // Export Lightmap UVs button
+        if (GUILayout.Button("Export Lightmap UVs")) {
+            ExportLightmapUVs();
+        }
+
         // Export Lightmaps button
 
         if (GUILayout.Button("Export Lightmaps")) {
@@ -147,49 +169,229 @@ public class LightmapperUI : EditorWindow
         }
     }
 
+    private void ImportGLTF() {
+        GameObject root = Importer.LoadFromFile(mInputFilePath);
+
+        var foundMeshes = new Dictionary <int, UnityEngine.Mesh>();
+        ProcessNewlyImportedGameObject(root, foundMeshes);
+
+        // Create lightmap UVs.
+        foreach (var pair in foundMeshes) {
+            Unwrapping.GenerateSecondaryUVSet(pair.Value);
+        }
+    }
+
+    private void ProcessNewlyImportedGameObject(
+        GameObject gameObject,
+        Dictionary <int, UnityEngine.Mesh> foundMeshes) {
+        gameObject.isStatic = true;
+
+        if (gameObject.GetComponent <MeshRenderer>() != null) {
+            MeshFilter meshFilter = gameObject.GetComponent <MeshFilter>();
+            if (meshFilter != null) {
+                UnityEngine.Mesh mesh = meshFilter.sharedMesh;
+                if (!foundMeshes.ContainsKey(mesh.GetInstanceID())) {
+                    foundMeshes.Add(mesh.GetInstanceID(), mesh);
+                }
+            }
+        }
+
+        for (int i = 0; i < gameObject.transform.childCount; i++) {
+            ProcessNewlyImportedGameObject(
+                gameObject.transform.GetChild(i).gameObject,
+                foundMeshes);
+        }
+    }
+
+    private GameObjectLightmapInfo GetGameObjectLightmapInfo(GameObject gameObject) {
+        // Make sure the GameObject is static.
+        if (!gameObject.isStatic) {
+            return(null);
+        }
+
+        // Make sure the GameObject has a mesh renderer.
+        MeshRenderer meshRenderer = gameObject.GetComponent <MeshRenderer>();
+        if (meshRenderer == null) {
+            return(null);
+        }
+
+        // Make sure the GameObject's mesh renderer has a lightmap, and that that lightmap has
+        // a color component.
+        int lightmapIndex = meshRenderer.lightmapIndex;
+        if (lightmapIndex < 0 || lightmapIndex >= LightmapSettings.lightmaps.Length ||
+            LightmapSettings.lightmaps[lightmapIndex].lightmapColor == null) {
+            return(null);
+        }
+
+        // Make sure the GameObject has an attached mesh.
+        MeshFilter meshFilter = gameObject.GetComponent <MeshFilter>();
+        if (meshFilter == null || meshFilter.sharedMesh == null) {
+            return(null);
+        }
+
+        // OK, we're going to process the object. Return the lightmap info.
+        var lightmapInfo = new GameObjectLightmapInfo();
+        lightmapInfo.LightmapIndex = lightmapIndex;
+        lightmapInfo.Mesh          = meshFilter.sharedMesh;
+        return(lightmapInfo);
+    }
+
+    private string GetColorLightmapPath(Texture2D lightmapColor) {
+        return(Path.Join(mOutputLightmapDirPath, lightmapColor.name + ".hdr"));
+    }
+
+    private void ExportLightmapUVs() {
+        var gltf = ModelRoot.Load(mInputFilePath);
+
+        // TODO: Other scenes?
+        var scene = gltf.DefaultScene;
+
+        foreach (var buffer in gltf.LogicalBuffers) {
+            Debug.Log(buffer);
+        }
+
+        var          usedMeshes  = new Dictionary <string, UnityEngine.Mesh>();
+        GameObject[] gameObjects =
+            (GameObject[])GameObject.FindSceneObjectsOfType(typeof(GameObject));
+
+        foreach (GameObject gameObject in gameObjects) {
+            GameObjectLightmapInfo lightmapInfo = GetGameObjectLightmapInfo(gameObject);
+            if (lightmapInfo == null) {
+                continue;
+            }
+
+            usedMeshes.Add(lightmapInfo.Mesh.name, lightmapInfo.Mesh);
+        }
+
+        ExportLightmapUVsForGLTFNode(gltf, usedMeshes, scene);
+        WriteLightmapPathsToGLTFNodes(gltf, usedMeshes, scene);
+
+        gltf.SaveGLB(mOutputFilePath);
+    }
+
+    private void ExportLightmapUVsForGLTFNode(
+        ModelRoot gltf,
+        Dictionary <string, UnityEngine.Mesh> usedMeshes,
+        IVisualNodeContainer nodeContainer) {
+        // FIXME: This is wrong! We should be grabbing meshes, not traversing objects.
+        if (nodeContainer is Node) {
+            Node node = (Node)nodeContainer;
+            if (node.Mesh != null) {
+                var mesh = node.Mesh;
+                if (usedMeshes.ContainsKey(mesh.Name)) {
+                    var unityMesh = usedMeshes[mesh.Name];
+
+                    int unitySubmeshCount = unityMesh.subMeshCount;
+                    if (mesh.Primitives.Count != unitySubmeshCount) {
+                        Debug.LogWarning("Couldn't export lightmap UVs for " + mesh.Name +
+                                         " because the Unity mesh has " +
+                                         unitySubmeshCount +
+                                         " submesh(es) but the glTF mesh has " +
+                                         mesh.Primitives.Count + " primitive(s)");
+                    } else {
+                        var uvs = new List <UnityEngine.Vector2>();
+                        unityMesh.GetUVs(1, uvs);
+
+                        var gltfUVs = new List <System.Numerics.Vector2>();
+                        for (int i = 0; i < uvs.Count; i++) {
+                            UnityEngine.Vector2 uv = uvs[i];
+                            gltfUVs.Add(new System.Numerics.Vector2(uv.x, uv.y));
+                        }
+
+                        if (uvs.Count != 0) {
+                            foreach (MeshPrimitive primitive in mesh.Primitives) {
+                                primitive.WithVertexAccessor(
+                                    "TEXCOORD_1",
+                                    (IReadOnlyList <System.Numerics.Vector2>)gltfUVs);
+                            }
+
+                            Debug.Log("Added " + uvs.Count + " lightmap UVs for mesh " +
+                                      mesh.Name + " with " + mesh.Primitives.Count +
+                                      " primitives");
+                        }
+                    }
+                }
+            }
+        }
+
+        foreach (var kid in nodeContainer.VisualChildren) {
+            ExportLightmapUVsForGLTFNode(gltf, usedMeshes, kid);
+        }
+    }
+
+    private void WriteLightmapPathsToGLTFNodes(
+        ModelRoot gltf,
+        Dictionary <string, UnityEngine.Mesh> usedMeshes,
+        IVisualNodeContainer nodeContainer) {
+        if (nodeContainer is Node) {
+            Node node = (Node)nodeContainer;
+            if (node.Mesh != null && usedMeshes.ContainsKey(node.Mesh.Name)) {
+                // FIXME: Scope this to the root node.
+                GameObject gameObject = GameObject.Find(node.Name);
+                if (gameObject != null) {
+                    GameObjectLightmapInfo lightmapInfo = GetGameObjectLightmapInfo(gameObject);
+                    if (lightmapInfo != null) {
+                        int          lightmapIndex = lightmapInfo.LightmapIndex;
+                        LightmapData lightmapData  = LightmapSettings.lightmaps[lightmapIndex];
+                        Texture2D    lightmapColor = lightmapData.lightmapColor;
+                        string       lightmapPath  = GetColorLightmapPath(lightmapColor);
+
+                        Dictionary <string, object> extrasDictionary;
+                        if (node.Extras.Content != null) {
+                            extrasDictionary = ((IReadOnlyDictionary <string, object>)
+                                                node.Extras.Content).ToDictionary(
+                                pair => pair.Key, pair => pair.Value);
+                        } else {
+                            extrasDictionary = new Dictionary <string, object>();
+                        }
+
+                        extrasDictionary.Add("Lightmap", lightmapPath);
+                        node.Extras = JsonContent.CreateFrom(extrasDictionary);
+
+                        Debug.Log("Annotated " + node.Name + " with lightmap path " + lightmapPath);
+                    }
+                }
+            }
+        }
+
+        foreach (var kid in nodeContainer.VisualChildren) {
+            WriteLightmapPathsToGLTFNodes(gltf, usedMeshes, kid);
+        }
+    }
+
     private void ExportLightmaps() {
         // Make the lightmap directory if necessary.
         Directory.CreateDirectory(mOutputLightmapDirPath);
 
-        GameObject[] gameObjects = FindObjectsOfType <GameObject>();
-        var usedLightmapIndices = new HashSet<int>();
+        GameObject[] gameObjects         = FindObjectsOfType <GameObject>();
+        var          usedLightmapIndices = new HashSet <int>();
 
         // Find all lightmaps used by static GameObjects.
         foreach (GameObject gameObject in gameObjects) {
-            // Is the object static?
-            if (!gameObject.isStatic) {
-                continue;
+            GameObjectLightmapInfo lightmapInfo = GetGameObjectLightmapInfo(gameObject);
+            if (lightmapInfo != null) {
+                usedLightmapIndices.Add(lightmapInfo.LightmapIndex);
             }
-
-            // Does the object have a mesh renderer?
-            MeshRenderer meshRenderer = gameObject.GetComponent <MeshRenderer>();
-            if (meshRenderer == null) {
-                continue;
-            }
-
-            // Does the object have a baked lightmap?
-            if (meshRenderer.lightmapIndex >= LightmapSettings.lightmaps.Length) {
-                continue;
-            }
-
-            usedLightmapIndices.Add(meshRenderer.lightmapIndex);
         }
 
         // Convert every lightmap.
         foreach (int lightmapIndex in usedLightmapIndices) {
-            // Does the lightmap have a color texture?
             LightmapData lightmapData  = LightmapSettings.lightmaps[lightmapIndex];
             Texture2D    lightmapColor = lightmapData.lightmapColor;
-            if (lightmapColor == null) {
-                continue;
+
+            // Make the texture readable if necessary.
+            if (!lightmapColor.isReadable) {
+                string sourcePath      = AssetDatabase.GetAssetPath(lightmapColor);
+                var    textureImporter = (TextureImporter)AssetImporter.GetAtPath(sourcePath);
+                textureImporter.isReadable = true;
+                textureImporter.SaveAndReimport();
             }
 
             // Get the lumel data.
             Color[] lumelData = lightmapColor.GetPixels(0);
-
             Debug.Log("lumelData size=" + lumelData.Length + " texsize=" + lightmapColor.width * lightmapColor.height * 3);
 
-            string outputPath = Path.Join(mOutputLightmapDirPath, lightmapColor.name + ".hdr");
+            string outputPath = GetColorLightmapPath(lightmapColor);
 
             using (FileStream outputStream = File.Open(outputPath, FileMode.Create)) {
                 using (var binaryWriter = new BinaryWriter(outputStream)) {
@@ -201,8 +403,6 @@ public class LightmapperUI : EditorWindow
                 }
             }
         }
-
-        //EncodeRadianceHDR();
     }
 
     // http://c0de517e.blogspot.com/2013/07/tiny-hdr-writer.html

@@ -207,9 +207,9 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     var color = base_color;
     color *= textureSample(base_color_texture, base_color_sampler, mesh.uv);
 #ifdef VERTEX_LIGHTMAP_UVS
-    //color *= textureSample(lightmap_texture, lightmap_sampler, mesh.lightmap_uv);
+    color *= textureSample(lightmap_texture, lightmap_sampler, mesh.lightmap_uv);
 #endif
-    color = vec4(color.rgb * eevee_sample_irradiance_volume(mesh.world_position.xyz, mesh.world_normal), color.a);
+    //color = vec4(color.rgb * eevee_sample_irradiance_volume(mesh.world_position.xyz, mesh.world_normal), color.a);
     return color;
 }
 
