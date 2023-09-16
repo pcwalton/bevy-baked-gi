@@ -20,7 +20,7 @@ your scenes using a tool external to Bevy. Fortunately, `bevy-baked-gi`
 provides convenient tools that allow the use of either [Blender] with [The
 Lightmapper] add-on or [Unity] to compute the lighting. You can use either
 these tools or another of your choice:
-//!
+
 1. `bevy-baked-gi` provides a built-in asset loader for glTF scenes with a
 `.gi.gltf` or `.gi.glb` extension that correctly handles global illumination
 baked with The Lightmapper. Lightmaps built with The Lightmapper will be
@@ -64,3 +64,5 @@ Unity, a detailed description of the lightmap and irradiance volume format
 is available in [the documentation].
 
 [Global illumination]: http://en.wikipedia.org/wiki/Global_illumination
+
+[Unity]: http://unity.com/

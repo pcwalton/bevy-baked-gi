@@ -8,7 +8,8 @@ use bevy::prelude::{
 };
 use bevy::scene::SceneBundle;
 use bevy::DefaultPlugins;
-use bevy_baked_gi::{IrradianceVolume, IrradianceVolumesPlugin};
+use bevy_baked_gi::irradiance_volumes::IrradianceVolume;
+use bevy_baked_gi::BakedGiPlugin;
 use bevy_egui::EguiPlugin;
 use bevy_view_controls_egui::{ControllableCamera, ViewControlsPlugin};
 use std::env;
@@ -29,7 +30,7 @@ fn main() {
         )
         .add_plugins(EguiPlugin)
         .add_plugins(ViewControlsPlugin)
-        .add_plugins(IrradianceVolumesPlugin::default())
+        .add_plugins(BakedGiPlugin::default())
         .add_systems(Startup, setup)
         .add_systems(Startup, bevy_view_controls_egui::simple_setup)
         .add_systems(Update, bevy_view_controls_egui::simple_view_controls)

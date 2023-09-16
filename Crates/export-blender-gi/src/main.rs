@@ -1,12 +1,12 @@
-// bevy-irradiance-volumes/Crates/export-blender-gi/src/main.rs
+// bevy-baked-gi/Crates/export-blender-gi/src/main.rs
 
-use bevy_irradiance_volumes::{
+use bevy_baked_gi::irradiance_volumes::{
     IrradianceVolume, IrradianceVolumeMetadata, IRRADIANCE_GRID_BYTES_PER_CELL,
     IRRADIANCE_GRID_BYTES_PER_SAMPLE,
 };
 use blend::Blend;
 use clap::Parser;
-use glam::{ivec2, uvec3, IVec2, IVec3, Mat4, Vec3};
+use glam::{ivec2, IVec2, IVec3, Mat4, Vec3};
 use std::env;
 use std::fs::File;
 use std::io::Read;
