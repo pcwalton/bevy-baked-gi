@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "Crates/bevy-irradiance-volumes",
+    "Crates/bevy-baked-gi",
     "Crates/export-blender-gi",
 ]
 resolver = "2"

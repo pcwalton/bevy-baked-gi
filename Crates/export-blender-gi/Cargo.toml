@@ -13,8 +13,8 @@ byteorder = "1"
 glam = "0.24"
 itertools = "0.11"
 
-[dependencies.bevy-irradiance-volumes]
-path = "../bevy-irradiance-volumes"
+[dependencies.bevy-baked-gi]
+path = "../bevy-baked-gi"
 
 [dependencies.clap]
 version = "4"
