@@ -1,5 +1,6 @@
 // bevy-baked-gi/Crates/bevy-baked-gi/src/irradiance_volumes.rs
 
+use crate::lightmaps::{Lightmap, LIGHTMAP_UV_ATTRIBUTE};
 use crate::Lightmapped;
 use bevy::asset::{AssetLoader, Error as AnyhowError, LoadContext, LoadedAsset};
 use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d, Transparent3d};
@@ -18,7 +19,8 @@ use bevy::pbr::{
 use bevy::prelude::{
     error, info, warn, AlphaMode, AssetEvent, Assets, Changed, Commands, Component, Entity,
     EnvironmentMapLight, EventReader, FromWorld, GlobalTransform, Handle, IVec2, IVec3, Image,
-    Mat4, Material, Mesh, Msaa, Or, Query, Res, ResMut, Resource, Vec3, Vec4, With, Without, World, StandardMaterial,
+    Mat4, Material, Mesh, Msaa, Name, Or, Query, Res, ResMut, Resource, StandardMaterial, Vec3,
+    Vec4, With, Without, World,
 };
 use bevy::reflect::{Reflect, TypeUuid};
 use bevy::render::extract_component::ExtractComponent;
@@ -66,6 +68,7 @@ pub struct IrradianceVolumeMetadata {
     pub level_bias: f32,
 }
 
+/// Stores information about the global illumination on this entity.
 #[derive(Clone, Component, ExtractComponent, AsBindGroup, Reflect)]
 pub struct ComputedIrradianceVolumeInfo {
     #[uniform(0)]
@@ -78,7 +81,7 @@ pub struct IrradianceVolumeAssetLoader;
 
 #[derive(Clone, Default, Reflect, AsBindGroup, TypeUuid, Debug)]
 #[uuid = "d18d9aa6-5053-4cb4-8b59-a1b2d1e6b6db"]
-pub struct IrradianceVolumePbrMaterial {
+pub struct GiPbrMaterial {
     #[uniform(0)]
     pub base_color: Vec4,
     #[texture(1)]
@@ -99,27 +102,35 @@ pub struct IrradianceGrid {
     gpu_data: Vec<IrradianceVolumeDescriptor>,
 }
 
-pub struct SetIrradianceVolumeDataBindGroup<const I: usize>;
+pub struct SetGiPbrDataBindGroup<const I: usize>;
 
-pub type DrawIrradianceVolumePbrMaterial = (
+pub type DrawGiPbrMaterial = (
     SetItemPipeline,
     SetMeshViewBindGroup<0>,
-    SetMaterialBindGroup<IrradianceVolumePbrMaterial, 1>,
+    SetMaterialBindGroup<GiPbrMaterial, 1>,
     SetMeshBindGroup<2>,
-    SetIrradianceVolumeDataBindGroup<3>,
+    SetGiPbrDataBindGroup<3>,
     DrawMesh,
 );
 
 #[derive(Component)]
-pub struct RenderIrradianceVolumeData(pub PreparedBindGroup<()>);
+pub struct RenderGiPbrData(pub PreparedBindGroup<()>);
 
 #[derive(Resource)]
-pub struct IrradianceVolumePbrPipeline {
-    material_pipeline: MaterialPipeline<IrradianceVolumePbrMaterial>,
-    irradiance_volume_data_bind_group_layout: BindGroupLayout,
+pub struct GiPbrPipeline {
+    material_pipeline: MaterialPipeline<GiPbrMaterial>,
+    irradiance_volume_bind_group_layout: BindGroupLayout,
+    lightmap_bind_group_layout: BindGroupLayout,
 }
 
-impl Material for IrradianceVolumePbrMaterial {
+#[derive(Clone, Copy, Default, Debug, Reflect, PartialEq, Eq, Hash)]
+pub enum LightingType {
+    #[default]
+    Dynamic,
+    Lightmapped,
+}
+
+impl Material for GiPbrMaterial {
     fn vertex_shader() -> ShaderRef {
         // TODO: Use `include_bytes!` instead.
         "IrradianceVolumePBR.wgsl".into()
@@ -131,15 +142,27 @@ impl Material for IrradianceVolumePbrMaterial {
     }
 }
 
-impl SpecializedMeshPipeline for IrradianceVolumePbrPipeline {
-    type Key = MaterialPipelineKey<IrradianceVolumePbrMaterial>;
+impl SpecializedMeshPipeline for GiPbrPipeline {
+    type Key = (MaterialPipelineKey<GiPbrMaterial>, LightingType);
 
     fn specialize(
         &self,
         key: Self::Key,
         layout: &MeshVertexBufferLayout,
     ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
-        let mut descriptor = self.material_pipeline.specialize(key, layout)?;
+        let mut descriptor = self.material_pipeline.specialize(key.0, layout)?;
+
+        if key.1 == LightingType::Dynamic {
+            descriptor
+                .vertex
+                .shader_defs
+                .push("FRAGMENT_IRRADIANCE_VOLUME".into());
+            if let Some(ref mut fragment) = descriptor.fragment {
+                fragment
+                    .shader_defs
+                    .push("FRAGMENT_IRRADIANCE_VOLUME".into());
+            }
+        }
 
         // This is copy-and-pasted from `bevy_pbr::render::mesh::MeshPipeline::specialize`.
         let mut vertex_attributes = vec![];
@@ -159,13 +182,28 @@ impl SpecializedMeshPipeline for IrradianceVolumePbrPipeline {
             vertex_attributes.push(Mesh::ATTRIBUTE_COLOR.at_shader_location(4));
         }
 
+        if key.1 == LightingType::Lightmapped && layout.contains(LIGHTMAP_UV_ATTRIBUTE.clone()) {
+            descriptor
+                .vertex
+                .shader_defs
+                .push("VERTEX_LIGHTMAP_UVS".into());
+            if let Some(ref mut fragment) = descriptor.fragment {
+                fragment.shader_defs.push("VERTEX_LIGHTMAP_UVS".into());
+            }
+
+            vertex_attributes.push(LIGHTMAP_UV_ATTRIBUTE.at_shader_location(5));
+        }
+
         let vertex_layout = layout.get_layout(&vertex_attributes).unwrap();
         descriptor.vertex.buffers = vec![vertex_layout];
 
         debug_assert_eq!(descriptor.layout.len(), 3);
-        descriptor
-            .layout
-            .push(self.irradiance_volume_data_bind_group_layout.clone());
+
+        let gi_bind_group_layout = match key.1 {
+            LightingType::Dynamic => self.irradiance_volume_bind_group_layout.clone(),
+            LightingType::Lightmapped => self.lightmap_bind_group_layout.clone(),
+        };
+        descriptor.layout.push(gi_bind_group_layout);
 
         Ok(descriptor)
     }
@@ -305,13 +343,7 @@ pub fn update_irradiance_grid(
 pub fn apply_irradiance_volumes(
     mut commands: Commands,
     irradiance_grid: Res<IrradianceGrid>,
-    mut entities_query: Query<
-        Entity,
-        (
-            With<Handle<IrradianceVolumePbrMaterial>>,
-            Without<Lightmapped>,
-        ),
-    >,
+    mut entities_query: Query<Entity, (With<Handle<GiPbrMaterial>>, Without<Lightmapped>)>,
 ) {
     // FIXME: Check distance, fill in appropriately.
 
@@ -335,26 +367,37 @@ impl IrradianceVolumeMetadata {
     }
 }
 
-pub fn prepare_irradiance_volumes(
+pub fn prepare_gi_pbr_meshes(
     mut commands: Commands,
-    query: Query<(Entity, &ComputedIrradianceVolumeInfo)>,
-    pipeline: Res<IrradianceVolumePbrPipeline>,
+    query: Query<(
+        Entity,
+        Option<&ComputedIrradianceVolumeInfo>,
+        Option<&Lightmap>,
+    )>,
+    pipeline: Res<GiPbrPipeline>,
     render_device: Res<RenderDevice>,
     images: Res<RenderAssets<Image>>,
     fallback_image: Res<FallbackImage>,
 ) {
-    for (entity, data) in query.into_iter() {
-        let maybe_bind_group = data.as_bind_group(
-            &pipeline.irradiance_volume_data_bind_group_layout,
-            &render_device,
-            &images,
-            &fallback_image,
-        );
+    for (entity, maybe_irradiance_volume_info, maybe_lightmap) in query.into_iter() {
+        let maybe_bind_group = match (maybe_irradiance_volume_info, maybe_lightmap) {
+            (_, Some(lightmap)) => lightmap.as_bind_group(
+                &pipeline.lightmap_bind_group_layout,
+                &render_device,
+                &images,
+                &fallback_image,
+            ),
+            (Some(irradiance_volume_info), _) => irradiance_volume_info.as_bind_group(
+                &pipeline.irradiance_volume_bind_group_layout,
+                &render_device,
+                &images,
+                &fallback_image,
+            ),
+            (None, None) => continue,
+        };
         match maybe_bind_group {
             Ok(bind_group) => {
-                commands
-                    .entity(entity)
-                    .insert(RenderIrradianceVolumeData(bind_group));
+                commands.entity(entity).insert(RenderGiPbrData(bind_group));
             }
             Err(_) => {
                 warn!("Failed to create bind group for irradiance volume PBR material");
@@ -368,20 +411,21 @@ pub fn prepare_irradiance_volumes(
 /// When this goes upstream, this can either be refactored to avoid duplication or else just merged
 /// into `queue_material_meshes`.
 #[allow(clippy::too_many_arguments)]
-pub fn queue_irradiance_volume_pbr_material_meshes(
+pub fn queue_gi_pbr_material_meshes(
     opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
     alpha_mask_draw_functions: Res<DrawFunctions<AlphaMask3d>>,
     transparent_draw_functions: Res<DrawFunctions<Transparent3d>>,
-    material_pipeline: Res<IrradianceVolumePbrPipeline>,
-    mut pipelines: ResMut<SpecializedMeshPipelines<IrradianceVolumePbrPipeline>>,
+    material_pipeline: Res<GiPbrPipeline>,
+    mut pipelines: ResMut<SpecializedMeshPipelines<GiPbrPipeline>>,
     pipeline_cache: Res<PipelineCache>,
     msaa: Res<Msaa>,
     render_meshes: Res<RenderAssets<Mesh>>,
-    render_materials: Res<RenderMaterials<IrradianceVolumePbrMaterial>>,
+    render_materials: Res<RenderMaterials<GiPbrMaterial>>,
     material_meshes: Query<(
-        &Handle<IrradianceVolumePbrMaterial>,
+        &Handle<GiPbrMaterial>,
         &Handle<Mesh>,
         &MeshUniform,
+        Option<&Lightmap>,
     )>,
     images: Res<RenderAssets<Image>>,
     mut views: Query<(
@@ -412,15 +456,9 @@ pub fn queue_irradiance_volume_pbr_material_meshes(
         mut transparent_phase,
     ) in &mut views
     {
-        let draw_opaque_pbr = opaque_draw_functions
-            .read()
-            .id::<DrawIrradianceVolumePbrMaterial>();
-        let draw_alpha_mask_pbr = alpha_mask_draw_functions
-            .read()
-            .id::<DrawIrradianceVolumePbrMaterial>();
-        let draw_transparent_pbr = transparent_draw_functions
-            .read()
-            .id::<DrawIrradianceVolumePbrMaterial>();
+        let draw_opaque_pbr = opaque_draw_functions.read().id::<DrawGiPbrMaterial>();
+        let draw_alpha_mask_pbr = alpha_mask_draw_functions.read().id::<DrawGiPbrMaterial>();
+        let draw_transparent_pbr = transparent_draw_functions.read().id::<DrawGiPbrMaterial>();
 
         let mut view_key = MeshPipelineKey::from_msaa_samples(msaa.samples())
             | MeshPipelineKey::from_hdr(view.hdr);
@@ -470,7 +508,7 @@ pub fn queue_irradiance_volume_pbr_material_meshes(
 
         let rangefinder = view.rangefinder3d();
         for visible_entity in &visible_entities.entities {
-            if let Ok((material_handle, mesh_handle, mesh_uniform)) =
+            if let Ok((material_handle, mesh_handle, mesh_uniform, maybe_lightmap)) =
                 material_meshes.get(*visible_entity)
             {
                 if let (Some(mesh), Some(material)) = (
@@ -501,13 +539,21 @@ pub fn queue_irradiance_volume_pbr_material_meshes(
                         _ => (),
                     }
 
+                    let lighting_type = match maybe_lightmap {
+                        Some(_) => LightingType::Lightmapped,
+                        None => LightingType::Dynamic,
+                    };
+
                     let pipeline_id = pipelines.specialize(
                         &pipeline_cache,
                         &material_pipeline,
-                        MaterialPipelineKey {
-                            mesh_key,
-                            bind_group_data: material.key,
-                        },
+                        (
+                            MaterialPipelineKey {
+                                mesh_key,
+                                bind_group_data: material.key,
+                            },
+                            lighting_type,
+                        ),
                         &mesh.layout,
                     );
                     let pipeline_id = match pipeline_id {
@@ -555,14 +601,16 @@ pub fn queue_irradiance_volume_pbr_material_meshes(
     }
 }
 
-impl FromWorld for IrradianceVolumePbrPipeline {
+impl FromWorld for GiPbrPipeline {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
-        let irradiance_volume_data_bind_group_layout =
+        let irradiance_volume_bind_group_layout =
             ComputedIrradianceVolumeInfo::bind_group_layout(render_device);
-        IrradianceVolumePbrPipeline {
+        let lightmap_bind_group_layout = Lightmap::bind_group_layout(render_device);
+        GiPbrPipeline {
             material_pipeline: MaterialPipeline::from_world(world),
-            irradiance_volume_data_bind_group_layout,
+            irradiance_volume_bind_group_layout,
+            lightmap_bind_group_layout,
         }
     }
 }
@@ -573,13 +621,13 @@ fn put_texel(buffer: &mut [u8], texel: [u8; 4], p: IVec2, stride: usize) {
     buffer[offset..offset + 4].copy_from_slice(&texel)
 }
 
-impl<P, const I: usize> RenderCommand<P> for SetIrradianceVolumeDataBindGroup<I>
+impl<P, const I: usize> RenderCommand<P> for SetGiPbrDataBindGroup<I>
 where
     P: PhaseItem,
 {
     type Param = ();
     type ViewWorldQuery = ();
-    type ItemWorldQuery = Option<Read<RenderIrradianceVolumeData>>;
+    type ItemWorldQuery = Option<Read<RenderGiPbrData>>;
 
     #[inline]
     fn render<'w>(
@@ -591,8 +639,8 @@ where
     ) -> RenderCommandResult {
         match entity {
             None => RenderCommandResult::Failure,
-            Some(irradiance_data) => {
-                pass.set_bind_group(I, &irradiance_data.0.bind_group, &[]);
+            Some(gi_pbr_data) => {
+                pass.set_bind_group(I, &gi_pbr_data.0.bind_group, &[]);
                 RenderCommandResult::Success
             }
         }
@@ -603,22 +651,24 @@ fn div_ceil(a: u32, b: u32) -> u32 {
     (a + b - 1) / b
 }
 
+/// A system that upgrades non-lightmapped StandardMaterials to [GiPbrMaterial]s when irradiance
+/// volumes are present.
 pub fn upgrade_standard_materials_for_irradiance_volumes(
     mut commands: Commands,
-    irradiance_volume_query: Query<Entity, (With<Handle<IrradianceVolume>>, Without<Lightmapped>)>,
-    material_query: Query<(Entity, &Handle<StandardMaterial>)>,
+    irradiance_volume_query: Query<Entity, With<Handle<IrradianceVolume>>>,
+    material_query: Query<(Entity, Option<&Name>, &Handle<StandardMaterial>), Without<Lightmapped>>,
     standard_material_assets: Res<Assets<StandardMaterial>>,
-    mut pbr_gi_material_assets: ResMut<Assets<IrradianceVolumePbrMaterial>>,
+    mut pbr_gi_material_assets: ResMut<Assets<GiPbrMaterial>>,
 ) {
     if irradiance_volume_query.is_empty() {
         return;
     }
 
-    for (entity, standard_material_handle) in material_query.iter() {
+    for (entity, name, standard_material_handle) in material_query.iter() {
         let Some(standard_material) =
             standard_material_assets.get(standard_material_handle) else { continue };
 
-        let new_pbr_gi_material = pbr_gi_material_assets.add(IrradianceVolumePbrMaterial {
+        let new_pbr_gi_material = pbr_gi_material_assets.add(GiPbrMaterial {
             base_color: standard_material.base_color.as_rgba_f32().into(),
             base_color_texture: standard_material.base_color_texture.clone(),
         });
@@ -628,6 +678,9 @@ pub fn upgrade_standard_materials_for_irradiance_volumes(
             .remove::<Handle<StandardMaterial>>()
             .insert(new_pbr_gi_material);
 
-        info!("Upgraded standard material");
+        info!(
+            "Upgraded standard material on {:?} to a GI PBR material",
+            name
+        );
     }
 }

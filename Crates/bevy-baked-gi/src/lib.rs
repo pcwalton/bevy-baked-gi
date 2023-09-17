@@ -3,17 +3,11 @@
 #![doc = include_str!("../../../README.md")]
 #![allow(clippy::type_complexity)]
 
-use crate::irradiance_volumes::IrradianceVolumeMetadata;
 use crate::irradiance_volumes::{
-    ComputedIrradianceVolumeInfo, DrawIrradianceVolumePbrMaterial, IrradianceGrid,
-    IrradianceVolume, IrradianceVolumeAssetLoader, IrradianceVolumePbrMaterial,
-    IrradianceVolumePbrPipeline,
+    ComputedIrradianceVolumeInfo, DrawGiPbrMaterial, GiPbrMaterial, GiPbrPipeline, IrradianceGrid,
+    IrradianceVolume, IrradianceVolumeAssetLoader, IrradianceVolumeMetadata,
 };
-use crate::lightmaps::DrawLightmappedPbrMaterial;
-use crate::lightmaps::{
-    Lightmap, LightmapUvs, Lightmapped, LightmappedGltfAssetLoader, LightmappedPbrMaterial,
-    LightmappedPbrPipeline,
-};
+use crate::lightmaps::{Lightmap, LightmapUvs, Lightmapped, LightmappedGltfAssetLoader};
 use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d, Transparent3d};
 use bevy::gltf::GltfLoader;
 use bevy::pbr::{
@@ -34,6 +28,7 @@ use bevy::utils::HashMap;
 
 pub mod irradiance_volumes;
 pub mod lightmaps;
+pub mod reflection_probes;
 
 /// Add this plugin to your App in order to enable baked global illumination.
 #[derive(Default)]
@@ -45,28 +40,23 @@ impl Plugin for BakedGiPlugin {
     fn build(&self, app: &mut App) {
         // TODO: glTF instantiation should be optional.
         app.register_type::<IrradianceVolume>()
-            .register_type::<IrradianceVolumePbrMaterial>()
+            .register_type::<GiPbrMaterial>()
             .register_type::<IrradianceVolumeMetadata>()
             .register_type::<ComputedIrradianceVolumeInfo>()
-            .register_type::<LightmappedPbrMaterial>()
             .register_type::<Lightmap>()
             .register_type::<Lightmapped>()
             .add_asset::<IrradianceVolume>()
-            .add_asset::<IrradianceVolumePbrMaterial>()
+            .add_asset::<GiPbrMaterial>()
             .add_asset::<LightmapUvs>()
             .add_asset_loader(IrradianceVolumeAssetLoader)
             .preregister_asset_loader(&["gi.gltf", "gi.glb"])
             .init_resource::<IrradianceGrid>()
-            .add_plugins(
-                ExtractComponentPlugin::<Handle<IrradianceVolumePbrMaterial>>::extract_visible(),
-            )
+            .add_plugins(ExtractComponentPlugin::<Handle<GiPbrMaterial>>::extract_visible())
             .add_plugins(ExtractComponentPlugin::<ComputedIrradianceVolumeInfo>::extract_visible())
             .add_plugins(ExtractComponentPlugin::<Lightmap>::extract_visible())
             .add_plugins(ExtractComponentPlugin::<Lightmapped>::extract_visible())
-            .add_plugins(PrepassPipelinePlugin::<IrradianceVolumePbrMaterial>::default())
-            .add_plugins(PrepassPlugin::<IrradianceVolumePbrMaterial>::default())
-            .add_plugins(PrepassPipelinePlugin::<LightmappedPbrMaterial>::default())
-            .add_plugins(PrepassPlugin::<LightmappedPbrMaterial>::default())
+            .add_plugins(PrepassPipelinePlugin::<GiPbrMaterial>::default())
+            .add_plugins(PrepassPlugin::<GiPbrMaterial>::default())
             .add_systems(
                 PostUpdate,
                 irradiance_volumes::update_irradiance_grid
@@ -88,49 +78,23 @@ impl Plugin for BakedGiPlugin {
         let Ok(render_app) = app.get_sub_app_mut(RenderApp) else { return };
         render_app
             .init_resource::<DrawFunctions<Shadow>>()
-            .add_render_command::<Shadow, DrawPrepass<IrradianceVolumePbrMaterial>>()
-            .add_render_command::<Transparent3d, DrawIrradianceVolumePbrMaterial>()
-            .add_render_command::<Opaque3d, DrawIrradianceVolumePbrMaterial>()
-            .add_render_command::<AlphaMask3d, DrawIrradianceVolumePbrMaterial>()
-            .add_render_command::<Transparent3d, DrawLightmappedPbrMaterial>()
-            .add_render_command::<Opaque3d, DrawLightmappedPbrMaterial>()
-            .add_render_command::<AlphaMask3d, DrawLightmappedPbrMaterial>()
-            .init_resource::<ExtractedMaterials<IrradianceVolumePbrMaterial>>()
-            .init_resource::<RenderMaterials<IrradianceVolumePbrMaterial>>()
-            .init_resource::<SpecializedMeshPipelines<IrradianceVolumePbrPipeline>>()
-            .add_systems(
-                ExtractSchedule,
-                pbr::extract_materials::<IrradianceVolumePbrMaterial>,
-            )
-            .add_systems(
-                ExtractSchedule,
-                pbr::extract_materials::<LightmappedPbrMaterial>,
-            )
+            .add_render_command::<Shadow, DrawPrepass<GiPbrMaterial>>()
+            .add_render_command::<Transparent3d, DrawGiPbrMaterial>()
+            .add_render_command::<Opaque3d, DrawGiPbrMaterial>()
+            .add_render_command::<AlphaMask3d, DrawGiPbrMaterial>()
+            .init_resource::<ExtractedMaterials<GiPbrMaterial>>()
+            .init_resource::<RenderMaterials<GiPbrMaterial>>()
+            .init_resource::<SpecializedMeshPipelines<GiPbrPipeline>>()
+            .add_systems(ExtractSchedule, pbr::extract_materials::<GiPbrMaterial>)
             .add_systems(
                 Render,
                 (
-                    pbr::prepare_materials::<IrradianceVolumePbrMaterial>
+                    pbr::prepare_materials::<GiPbrMaterial>
                         .in_set(RenderSet::Prepare)
                         .after(PrepareAssetSet::PreAssetPrepare),
-                    pbr::queue_shadows::<IrradianceVolumePbrMaterial>
-                        .in_set(RenderLightSystems::QueueShadows),
-                    irradiance_volumes::queue_irradiance_volume_pbr_material_meshes
-                        .in_set(RenderSet::Queue),
-                    irradiance_volumes::prepare_irradiance_volumes
-                        .in_set(RenderSet::Prepare)
-                        .after(PrepareAssetSet::PreAssetPrepare),
-                ),
-            )
-            .add_systems(
-                Render,
-                (
-                    pbr::prepare_materials::<LightmappedPbrMaterial>
-                        .in_set(RenderSet::Prepare)
-                        .after(PrepareAssetSet::PreAssetPrepare),
-                    pbr::queue_shadows::<LightmappedPbrMaterial>
-                        .in_set(RenderLightSystems::QueueShadows),
-                    lightmaps::queue_lightmapped_pbr_material_meshes.in_set(RenderSet::Queue),
-                    lightmaps::prepare_lightmaps
+                    pbr::queue_shadows::<GiPbrMaterial>.in_set(RenderLightSystems::QueueShadows),
+                    irradiance_volumes::queue_gi_pbr_material_meshes.in_set(RenderSet::Queue),
+                    irradiance_volumes::prepare_gi_pbr_meshes
                         .in_set(RenderSet::Prepare)
                         .after(PrepareAssetSet::PreAssetPrepare),
                 ),
@@ -141,10 +105,8 @@ impl Plugin for BakedGiPlugin {
         if let Ok(render_app) = app.get_sub_app_mut(RenderApp) {
             // The plain MaterialPipelines are just for the prepass.
             render_app
-                .init_resource::<MaterialPipeline<IrradianceVolumePbrMaterial>>()
-                .init_resource::<MaterialPipeline<LightmappedPbrMaterial>>()
-                .init_resource::<IrradianceVolumePbrPipeline>()
-                .init_resource::<LightmappedPbrPipeline>();
+                .init_resource::<MaterialPipeline<GiPbrMaterial>>()
+                .init_resource::<GiPbrPipeline>();
         }
 
         // This is copy-and-pasted from `GltfPlugin::finish()`.

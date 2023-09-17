@@ -22,6 +22,9 @@ struct Vertex {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+#ifdef VERTEX_LIGHTMAP_UVS
+    @location(5) lightmap_uv: vec2<f32>,
+#endif
 };
 
 struct VertexOutput {
@@ -35,7 +38,12 @@ struct VertexOutput {
 #ifdef VERTEX_COLORS
     @location(4) color: vec4<f32>,
 #endif
+#ifdef VERTEX_LIGHTMAP_UVS
+    @location(5) lightmap_uv: vec2<f32>,
+#endif
 };
+
+#ifdef FRAGMENT_IRRADIANCE_VOLUME
 
 struct IrradianceData {
     cubesides: array<vec3<f32>, 3>,
@@ -56,16 +64,31 @@ struct GridData {
     offset: i32,
 }
 
+#endif  // FRAGMENT_IRRADIANCE_VOLUME
+
 @group(1) @binding(0)
 var<uniform> base_color: vec4<f32>;
 @group(1) @binding(1)
 var base_color_texture: texture_2d<f32>;
 @group(1) @binding(2)
 var base_color_sampler: sampler;
+
+#ifdef FRAGMENT_IRRADIANCE_VOLUME
 @group(3) @binding(0)
 var<uniform> grid_data: GridData;
 @group(3) @binding(1)
 var irradiance_grid: texture_2d<f32>;
+#endif
+#ifdef VERTEX_LIGHTMAP_UVS
+@group(3) @binding(0)
+var lightmap_texture: texture_2d<f32>;
+@group(3) @binding(1)
+var lightmap_sampler: sampler;
+@group(3) @binding(2)
+var<uniform> lightmap_uv_rect: vec4<f32>;
+#endif
+
+#ifdef FRAGMENT_IRRADIANCE_VOLUME
 
 fn texel_fetch(st: vec2<i32>) -> vec4<f32> {
     return textureLoad(irradiance_grid, st, 0);
@@ -177,11 +200,36 @@ fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     return rgb;
 }
 
+#endif  // FRAGMENT_IRRADIANCE_VOLUME
+
+@vertex
+fn vertex(vertex: Vertex) -> VertexOutput {
+    var model = mesh.model;
+
+    // FIXME: This isn't preserving base color for some reason.
+
+    var out: VertexOutput;
+    out.position = mesh_position_local_to_clip(mesh.model, vec4<f32>(vertex.position, 1.0));
+    out.world_position = mesh_position_local_to_world(model, vec4<f32>(vertex.position, 1.0));
+    out.world_normal = mesh_normal_local_to_world(vertex.normal);
+    out.uv = vertex.uv;
+#ifdef VERTEX_LIGHTMAP_UVS
+    out.lightmap_uv = vertex.lightmap_uv;
+#endif
+    return out;
+}
+
 @fragment
 fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     var color = base_color;
     color *= textureSample(base_color_texture, base_color_sampler, mesh.uv);
-    color = vec4(color.rgb * eevee_sample_irradiance_volume(mesh.world_position.xyz, mesh.world_normal), color.a);
+#ifdef VERTEX_LIGHTMAP_UVS
+    let lightmap_uv = mix(lightmap_uv_rect.xy, lightmap_uv_rect.zw, mesh.lightmap_uv);
+    color *= textureSample(lightmap_texture, lightmap_sampler, lightmap_uv) * 0.00075;
+#endif
+#ifdef FRAGMENT_IRRADIANCE_VOLUME
+    color *= vec4(eevee_sample_irradiance_volume(mesh.world_position.xyz, mesh.world_normal), 1.0);
+#endif
     return color;
 }
 
