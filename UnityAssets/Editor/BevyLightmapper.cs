@@ -422,10 +422,10 @@ public class LightmapperUI : EditorWindow
 							extrasDictionary = new Dictionary<string, object>();
 
 						extrasDictionary.Add("Lightmap", lightmapPath);
-						extrasDictionary.Add("LightmapMinX", lightmapInfo.LightmapMin.x);
-						extrasDictionary.Add("LightmapMinY", lightmapInfo.LightmapMin.y);
-						extrasDictionary.Add("LightmapMaxX", lightmapInfo.LightmapMax.x);
-						extrasDictionary.Add("LightmapMaxY", lightmapInfo.LightmapMax.y);
+						extrasDictionary.Add("LightmapMinU", lightmapInfo.LightmapMin.x);
+						extrasDictionary.Add("LightmapMinV", lightmapInfo.LightmapMin.y);
+						extrasDictionary.Add("LightmapMaxU", lightmapInfo.LightmapMax.x);
+						extrasDictionary.Add("LightmapMaxV", lightmapInfo.LightmapMax.y);
 
 						node.Extras = JsonContent.CreateFrom(extrasDictionary);
 

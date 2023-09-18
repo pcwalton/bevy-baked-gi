@@ -79,6 +79,7 @@ var<uniform> grid_data: GridData;
 @group(3) @binding(1)
 var irradiance_grid: texture_2d<f32>;
 #endif
+
 #ifdef VERTEX_LIGHTMAP_UVS
 @group(3) @binding(0)
 var lightmap_texture: texture_2d<f32>;
@@ -86,6 +87,15 @@ var lightmap_texture: texture_2d<f32>;
 var lightmap_sampler: sampler;
 @group(3) @binding(2)
 var<uniform> lightmap_uv_rect: vec4<f32>;
+#endif
+
+#ifdef FRAGMENT_REFLECTION_PROBE
+@group(4) @binding(0)
+var reflection_probe_diffuse: texture_cube<f32>;
+@group(4) @binding(1)
+var reflection_probe_specular: texture_cube<f32>;
+@group(4) @binding(2)
+var reflection_probe_sampler: sampler;
 #endif
 
 #ifdef FRAGMENT_IRRADIANCE_VOLUME
@@ -227,9 +237,21 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     let lightmap_uv = mix(lightmap_uv_rect.xy, lightmap_uv_rect.zw, mesh.lightmap_uv);
     color *= textureSample(lightmap_texture, lightmap_sampler, lightmap_uv) * 0.00075;
 #endif
+
 #ifdef FRAGMENT_IRRADIANCE_VOLUME
     color *= vec4(eevee_sample_irradiance_volume(mesh.world_position.xyz, mesh.world_normal), 1.0);
 #endif
+
+#ifdef FRAGMENT_REFLECTION_PROBE
+    // FIXME: This is wrong.
+#ifndef VERTEX_LIGHTMAP_UVS
+    color = vec4(textureSample(
+        reflection_probe_diffuse,
+        reflection_probe_sampler,
+        vec3(mesh.world_normal.xy, -mesh.world_normal.z)).rgb, 1.0);
+#endif
+#endif
+
     return color;
 }
 

@@ -1,19 +1,24 @@
 // bevy-baked-gi/Crates/bevy-baked-gi/src/lightmaps.rs
 
+use std::mem;
+use std::sync::{Arc, Mutex};
+
 use crate::irradiance_volumes::GiPbrMaterial;
+use crate::GltfGiSettings;
 use arrayvec::ArrayVec;
 use bevy::asset::{AssetLoader, AssetPath, Error as AnyhowError, LoadContext, LoadedAsset};
 use bevy::gltf::{GltfError, GltfExtras, GltfLoader};
 use bevy::math::vec4;
 use bevy::prelude::{
-    error, info, warn, AssetEvent, AssetServer, Assets, Children, Commands, Component, EventReader,
-    Handle, Image, Mesh, Query, Res, ResMut, StandardMaterial, Vec4, Without,
+    error, info, warn, AssetEvent, AssetServer, Assets, Children, Commands, Component, Deref,
+    DerefMut, Entity, EventReader, Handle, Image, Mesh, Query, Res, ResMut, Resource,
+    StandardMaterial, Vec4, Without,
 };
-use bevy::reflect::{Reflect, TypeUuid};
+use bevy::reflect::{Reflect, TypePath, TypeUuid};
 use bevy::render::extract_component::ExtractComponent;
 use bevy::render::mesh::MeshVertexAttribute;
 use bevy::render::render_resource::{AsBindGroup, VertexFormat};
-use bevy::utils::BoxedFuture;
+use bevy::utils::{BoxedFuture, HashSet};
 use gltf::buffer::Source;
 use gltf::{Gltf as GGltf, Mesh as GMesh, Primitive, Semantic};
 use serde_json::Value;
@@ -24,7 +29,7 @@ pub static LIGHTMAP_UV_ATTRIBUTE: MeshVertexAttribute =
 /// Stores information about the currently-active lightmap on this entity.
 ///
 /// This component does nothing unless the Lightmapped component is present on the same entity.
-#[derive(Clone, Component, ExtractComponent, AsBindGroup, Reflect)]
+#[derive(Clone, Component, ExtractComponent, AsBindGroup, Reflect, Debug)]
 pub struct Lightmap {
     #[texture(0)]
     #[sampler(1)]
@@ -51,7 +56,12 @@ pub struct LightmapUvs {
 
 pub struct LightmappedGltfAssetLoader {
     pub gltf_loader: GltfLoader,
+    pub(crate) kung_fu_death_grip: LightmapUvKungFuDeathGrip,
 }
+
+/// Holds references to all lightmap UVs so that they don't get freed.
+#[derive(Clone, Default, TypePath, Deref, DerefMut, Resource)]
+pub(crate) struct LightmapUvKungFuDeathGrip(Arc<Mutex<HashSet<Handle<LightmapUvs>>>>);
 
 /// Attach this component to an entity with a Mesh in order to use lightmaps.
 ///
@@ -77,66 +87,52 @@ pub struct Lightmapped;
 #[derive(Reflect, Default, Clone)]
 pub struct StaticLight;
 
-pub fn instantiate_lightmaps_in_gltf(
+pub fn apply_gltf_lightmap_settings(
     mut commands: Commands,
-    mut gltf_extras_query: Query<(&Children, &mut GltfExtras), Without<Handle<GiPbrMaterial>>>,
-    standard_material_query: Query<&Handle<StandardMaterial>>,
+    standard_material_query: Query<(Entity, &Handle<StandardMaterial>, &GltfGiSettings)>,
     asset_server: ResMut<AssetServer>,
     standard_material_assets: Res<Assets<StandardMaterial>>,
     mut gi_pbr_assets: ResMut<Assets<GiPbrMaterial>>,
 ) {
-    for (children, gltf_extras) in gltf_extras_query.iter_mut() {
-        let Ok(Value::Object(gltf_extras)) =
-            serde_json::from_str(&gltf_extras.value) else { continue };
-
-        let Some(Value::String(lightmap_path)) = gltf_extras.get("Lightmap") else { continue };
-
-        // Gather lightmap coordinates.
-        let lightmap_coords = [
-            "LightmapMinX",
-            "LightmapMinY",
-            "LightmapMaxX",
-            "LightmapMaxY",
-        ]
-        .iter()
-        .map(|name| match gltf_extras.get(*name) {
-            Some(Value::Number(number)) => match number.as_f64() {
-                Some(number) => Ok(number as f32),
-                None => Err(()),
-            },
-            _ => Err(()),
-        })
-        .collect::<Result<ArrayVec<f32, 4>, ()>>();
-
-        let lightmap_rect = lightmap_coords.map(|coords| Vec4::from_slice(&coords));
-        let lightmap = asset_server.load(lightmap_path);
-
-        for &kid in children.iter() {
-            let Ok(standard_material_handle) = standard_material_query.get(kid) else { continue };
-            let Some(standard_material) =
-                standard_material_assets.get(standard_material_handle) else { continue };
-
-            // TODO: Cache and reuse these!
-            let new_lightmapped_material = gi_pbr_assets.add(GiPbrMaterial {
-                base_color: standard_material.base_color.as_rgba_f32().into(),
-                base_color_texture: standard_material.base_color_texture.clone(),
-            });
-
-            commands
-                .entity(kid)
-                .remove::<Handle<StandardMaterial>>()
-                .insert(new_lightmapped_material)
-                .insert(Lightmap {
-                    image: lightmap.clone(),
-                    uv_rect: lightmap_rect.unwrap_or(vec4(0.0, 0.0, 1.0, 1.0)),
-                })
-                .insert(Lightmapped);
-
-            info!(
-                "Instantiated standard material with lightmap: {} and uv rect: {:?}",
-                lightmap_path, lightmap_rect
-            );
+    for (entity, standard_material_handle, gi_settings) in standard_material_query.iter() {
+        if gi_settings.disable_gi {
+            continue;
         }
+
+        let Some(ref lightmap_settings) = gi_settings.lightmap else { continue };
+        let Some(standard_material) =
+            standard_material_assets.get(standard_material_handle) else { continue };
+
+        let lightmap_rect = lightmap_settings.uv_rect;
+        let lightmap_rect = Vec4::from_array([
+            lightmap_rect.min.x,
+            lightmap_rect.min.y,
+            lightmap_rect.max.x,
+            lightmap_rect.max.y,
+        ]);
+        let lightmap = asset_server.load(&*lightmap_settings.path);
+
+        // TODO: Cache and reuse these!
+        let new_lightmapped_material = gi_pbr_assets.add(GiPbrMaterial {
+            base_color: standard_material.base_color.as_rgba_f32().into(),
+            base_color_texture: standard_material.base_color_texture.clone(),
+        });
+
+        commands
+            .entity(entity)
+            .remove::<Handle<StandardMaterial>>()
+            .insert(new_lightmapped_material)
+            .insert(Lightmap {
+                image: lightmap.clone(),
+                uv_rect: lightmap_rect,
+            })
+            .insert(Lightmapped);
+
+        info!(
+            "Instantiated standard material with lightmap: {} and uv rect: {:?}",
+            lightmap_settings.path.display(),
+            lightmap_rect
+        );
     }
 }
 
@@ -171,7 +167,7 @@ impl AssetLoader for LightmappedGltfAssetLoader {
                             continue;
                         };
 
-                        load_context.set_labeled_asset(
+                        let lightmap_uv_handle = load_context.set_labeled_asset(
                             &format!("{}/LightmapUV", primitive_label),
                             LoadedAsset::new(LightmapUvs {
                                 mesh_handle: mesh_handle.clone(),
@@ -180,10 +176,16 @@ impl AssetLoader for LightmappedGltfAssetLoader {
                         );
 
                         info!(
-                            "Loaded lightmap UVs: {}: {}",
+                            "Loaded lightmap UVs: {}: {}: {:?}",
                             load_context.path().display(),
-                            primitive_label
+                            primitive_label,
+                            lightmap_uv_handle.id()
                         );
+
+                        self.kung_fu_death_grip
+                            .lock()
+                            .unwrap()
+                            .insert(lightmap_uv_handle);
                     }
                 }
             }
@@ -198,26 +200,35 @@ impl AssetLoader for LightmappedGltfAssetLoader {
     }
 }
 
-pub fn handle_newly_added_lightmap_uvs(
+pub(crate) fn handle_lightmap_uv_asset_events(
     mut lightmap_uv_events: EventReader<AssetEvent<LightmapUvs>>,
     lightmap_uvs_assets: Res<Assets<LightmapUvs>>,
     mut mesh_assets: ResMut<Assets<Mesh>>,
+    kung_fu_death_grip: Res<LightmapUvKungFuDeathGrip>,
 ) {
     for asset_event in lightmap_uv_events.into_iter() {
         let lightmap_uvs_handle = match asset_event {
-            AssetEvent::Created { handle } | AssetEvent::Modified { handle } => (*handle).clone(),
+            AssetEvent::Created { handle } | AssetEvent::Modified { handle } => handle.clone(),
             AssetEvent::Removed { .. } => continue,
         };
 
-        let Some(lightmap_uvs) = lightmap_uvs_assets.get(&lightmap_uvs_handle) else { continue };
+        let Some(lightmap_uvs) = lightmap_uvs_assets.get(&lightmap_uvs_handle) else {
+            panic!(
+                "Failed to find lightmap UVs for {:?}, did they get freed?",
+                lightmap_uvs_handle.id()
+            );
+        };
 
         let Some(mesh) = mesh_assets.get_mut(&lightmap_uvs.mesh_handle) else {
-            error!("Didn't find the mesh");
+            error!("Didn't find the mesh referenced by lightmap UVs {:?}", lightmap_uvs_handle);
             continue;
         };
 
         mesh.insert_attribute(LIGHTMAP_UV_ATTRIBUTE.clone(), lightmap_uvs.uvs.clone());
-        info!("Copied lightmap UVs");
+        info!("Copied lightmap UVs {:?}", lightmap_uvs_handle);
+
+        // It's OK to drop the lightmap UVs now, since they've been added to the mesh.
+        kung_fu_death_grip.lock().unwrap().remove(&lightmap_uvs_handle);
     }
 }
 
