@@ -1,7 +1,6 @@
 // bevy-baked-gi/Crates/export-blender-gi/src/main.rs
 
 use anyhow::Result as AnyhowResult;
-use arrayvec::ArrayVec;
 use bevy_baked_gi::irradiance_volumes::{
     IrradianceVolume, IrradianceVolumeMetadata, IRRADIANCE_GRID_BYTES_PER_CELL,
     IRRADIANCE_GRID_BYTES_PER_SAMPLE,
@@ -15,7 +14,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::{env, mem};
+use std::env;
 
 const VK_FORMAT_B10G11R11_UFLOAT_PACK32: u32 = 122;
 
