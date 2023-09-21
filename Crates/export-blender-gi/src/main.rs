@@ -1,5 +1,8 @@
 // bevy-baked-gi/Crates/export-blender-gi/src/main.rs
 
+use crate::ibllib_bindings::{
+    IBLLib_Distribution_GGX, IBLLib_Distribution_Lambertian, IBLLib_Result_Success,
+};
 use anyhow::Result as AnyhowResult;
 use bevy_baked_gi::irradiance_volumes::{
     IrradianceVolume, IrradianceVolumeMetadata, IRRADIANCE_GRID_BYTES_PER_CELL,
@@ -8,15 +11,18 @@ use bevy_baked_gi::irradiance_volumes::{
 use blend::{Blend, Instance};
 use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 use clap::Parser;
-use glam::{ivec2, uvec2, uvec3, vec3, IVec2, IVec3, Mat4, UVec2, Vec3, Vec3Swizzles};
-use std::env;
-use std::ffi::OsStr;
+use glam::{ivec2, uvec2, vec3, IVec2, IVec3, Mat4, UVec2, Vec3, Vec3Swizzles};
+use ibllib_bindings::IBLLib_OutputFormat_R32G32B32A32_SFLOAT;
+use std::ffi::{CString, OsStr};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::{env, fs};
+use tempfile::NamedTempFile;
 
-const VK_FORMAT_R32G32B32A32_SFLOAT: u32 = 109;
+#[allow(non_upper_case_globals, non_camel_case_types, unused)]
+mod ibllib_bindings;
 
 const KHR_DF_VERSIONNUMBER_1_3: u16 = 2;
 const DFD_DESCRIPTOR_SIZE: u16 = 24 + 16 * 4;
@@ -31,6 +37,9 @@ const KHR_DF_CHANNEL_RGBSDA_R: u32 = 0;
 const KHR_DF_CHANNEL_RGBSDA_G: u32 = 1;
 const KHR_DF_CHANNEL_RGBSDA_B: u32 = 2;
 const KHR_DF_CHANNEL_RGBSDA_A: u32 = 15;
+
+const SAMPLE_COUNT: u32 = 1024;
+const LOD_BIAS: f32 = 0.0;
 
 static CUBEMAP_FACES: [(usize, CubeFaceRotation); 6] = [
     (0, CubeFaceRotation::Rotate90Ccw),
@@ -179,7 +188,6 @@ fn get_texel(buffer: &[u8], p: IVec2, stride: usize) -> [u8; 4] {
 
 fn extract_reflection_probes(light_cache_data: &Instance, output_dir: &Path, filename: &OsStr) {
     let cube_texture = light_cache_data.get("cube_tx");
-    println!("cube_tx={:#?}", cube_texture);
 
     let cube_dimensions = IVec3::from_slice(&cube_texture.get_i32_vec("tex_size"));
     let cube_texture_data = cube_texture.get_u8_vec("data");
@@ -190,69 +198,135 @@ fn extract_reflection_probes(light_cache_data: &Instance, output_dir: &Path, fil
     let cubemap_count = cube_texture_data.len() / cubemap_byte_size_r11g11b10;
     debug_assert_eq!(cube_texture_data.len() % cubemap_byte_size_r11g11b10, 0);
 
+    for cubemap_index in 0..cubemap_count {
+        extract_single_reflection_probe(
+            cubemap_index,
+            cube_dimensions,
+            &cube_texture_data,
+            output_dir,
+            filename,
+        );
+    }
+}
+
+fn extract_single_reflection_probe(
+    cubemap_index: usize,
+    cube_dimensions: IVec3,
+    cube_texture_data: &[u8],
+    output_dir: &Path,
+    filename: &OsStr,
+) {
     let cubemap_face_byte_size_rgba_f32 =
         cube_dimensions.x as usize * cube_dimensions.y as usize * 16;
     let cubemap_byte_size_rgba_f32 = cubemap_face_byte_size_rgba_f32 * 6;
 
     let mut output_data = vec![0; cubemap_byte_size_rgba_f32];
 
-    for cubemap_index in 0..cubemap_count {
-        let mut output_path = output_dir.to_owned();
-        output_path.push(&format!(
-            "{}.{:0>3}.ktx2",
-            filename.to_string_lossy(),
-            cubemap_index
-        ));
-        let mut output = File::create(&output_path)
-            .unwrap_or_else(|err| die(format!("Failed to create an output cubemap: {:?}", err)));
+    let width = cube_dimensions.x as u32;
+    let height = cube_dimensions.y as u32;
 
-        let width = cube_dimensions.x as u32;
-        let height = cube_dimensions.y as u32;
+    // Cubemap faces are stored in the order +X, -X, +Y, -Y, +Z, -Z.
+    //   +X ← mirror(ccw(+X))
+    //   -X ← mirror(cw(-X))
+    //   +Y ← mirror(rot180(+Z))
+    //   -Y ← mirror(-Z)
+    //   +Z ← mirror(+Y)
+    //   -Z ← mirror(-Y)
+    for (dest_face_index, &(src_face_index, rotation)) in CUBEMAP_FACES.iter().enumerate() {
+        for y in 0..height {
+            for x in 0..width {
+                let src_pos = uvec2(x, y);
+                let texel = get_cubemap_texel(
+                    cube_texture_data,
+                    cube_dimensions.as_uvec3().xy(),
+                    cubemap_index,
+                    src_face_index,
+                    src_pos,
+                );
 
-        // Cubemap faces are stored in the order +X, -X, +Y, -Y, +Z, -Z.
-        //   +X ← mirror(ccw(+X))
-        //   -X ← mirror(cw(-X))
-        //   +Y ← mirror(rot180(+Z))
-        //   -Y ← mirror(-Z)
-        //   +Z ← mirror(+Y)
-        //   -Z ← mirror(-Y)
-        for (dest_face_index, &(src_face_index, rotation)) in CUBEMAP_FACES.iter().enumerate() {
-            for y in 0..height {
-                for x in 0..width {
-                    let src_pos = uvec2(x, y);
-                    let texel = get_cubemap_texel(
-                        &cube_texture_data,
-                        cube_dimensions.as_uvec3().xy(),
-                        cubemap_index,
-                        src_face_index,
-                        src_pos,
-                    );
+                let mut dest_pos = match rotation {
+                    CubeFaceRotation::None => src_pos,
+                    CubeFaceRotation::Rotate90Ccw => uvec2(height - y - 1, x),
+                    CubeFaceRotation::Rotate180 => uvec2(width - x - 1, height - y - 1),
+                    CubeFaceRotation::Rotate90Cw => uvec2(y, width - x - 1),
+                };
 
-                    let mut dest_pos = match rotation {
-                        CubeFaceRotation::None => src_pos,
-                        CubeFaceRotation::Rotate90Ccw => uvec2(height - y - 1, x),
-                        CubeFaceRotation::Rotate180 => uvec2(width - x - 1, height - y - 1),
-                        CubeFaceRotation::Rotate90Cw => uvec2(y, width - x - 1),
-                    };
+                dest_pos.x = width - dest_pos.x - 1;
 
-                    dest_pos.x = width - dest_pos.x - 1;
-
-                    put_cubemap_texel(
-                        &mut output_data,
-                        texel,
-                        cube_dimensions.as_uvec3().xy(),
-                        dest_face_index,
-                        dest_pos,
-                    );
-                }
+                put_cubemap_texel(
+                    &mut output_data,
+                    texel,
+                    cube_dimensions.as_uvec3().xy(),
+                    dest_face_index,
+                    dest_pos,
+                );
             }
         }
-
-        write_ktx2(&mut output, &output_data, cube_dimensions).unwrap();
     }
+
+    let mut raw_cubemap =
+        NamedTempFile::new().expect("Failed to create temporary file for the raw cubemap");
+    write_ktx2(&mut raw_cubemap, &output_data, cube_dimensions).unwrap();
+    let (_, raw_cubemap_path) = raw_cubemap.keep().unwrap();
+
+    let lut = NamedTempFile::new().expect("Failed to create temporary file for the LUT");
+    let (_, lut_path) = lut.keep().unwrap();
+
+    let output_path = output_dir.to_owned();
+    let diffuse_output_path = output_path.join(format!(
+        "{}.diffuse.{:0>3}.ktx2",
+        filename.to_string_lossy(),
+        cubemap_index
+    ));
+    let specular_output_path = output_path.join(format!(
+        "{}.specular.{:0>3}.ktx2",
+        filename.to_string_lossy(),
+        cubemap_index
+    ));
+
+    unsafe {
+        let raw_cubemap_path = CString::new(raw_cubemap_path.to_str().unwrap()).unwrap();
+        let diffuse_output_path = CString::new(diffuse_output_path.to_str().unwrap()).unwrap();
+        let specular_output_path = CString::new(specular_output_path.to_str().unwrap()).unwrap();
+        let lut_path = CString::new(lut_path.to_str().unwrap()).unwrap();
+
+        let result = ibllib_bindings::IBLSample(
+            raw_cubemap_path.as_ptr(),
+            diffuse_output_path.as_ptr(),
+            lut_path.as_ptr(),
+            IBLLib_Distribution_Lambertian,
+            height,
+            0,
+            SAMPLE_COUNT,
+            IBLLib_OutputFormat_R32G32B32A32_SFLOAT,
+            LOD_BIAS,
+            false,
+        );
+        assert_eq!(result, IBLLib_Result_Success);
+
+        let result = ibllib_bindings::IBLSample(
+            raw_cubemap_path.as_ptr(),
+            specular_output_path.as_ptr(),
+            lut_path.as_ptr(),
+            IBLLib_Distribution_GGX,
+            height,
+            0,
+            SAMPLE_COUNT,
+            IBLLib_OutputFormat_R32G32B32A32_SFLOAT,
+            LOD_BIAS,
+            false,
+        );
+        assert_eq!(result, IBLLib_Result_Success);
+    }
+
+    let _ = fs::remove_file(lut_path);
+    let _ = fs::remove_file(raw_cubemap_path);
 }
 
-fn write_ktx2(output: &mut File, texture_data: &[u8], dimensions: IVec3) -> AnyhowResult<()> {
+fn write_ktx2<F>(output: &mut F, texture_data: &[u8], dimensions: IVec3) -> AnyhowResult<()>
+where
+    F: Seek + Write,
+{
     output.write_all(&[
         0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A,
     ])?;
@@ -260,15 +334,15 @@ fn write_ktx2(output: &mut File, texture_data: &[u8], dimensions: IVec3) -> Anyh
     println!("dimensions={:?} size={:?}", dimensions, texture_data.len());
 
     for value in [
-        VK_FORMAT_R32G32B32A32_SFLOAT, // vkFormat
-        4,                             // typeSize
-        dimensions.x as _,             // pixelWidth
-        dimensions.y as _,             // pixelHeight
-        0,                             // pixelDepth
-        0,                             // layerCount
-        6,                             // faceCount
-        1,                             // levelCount
-        0,                             // supercompressionScheme
+        IBLLib_OutputFormat_R32G32B32A32_SFLOAT as u32, // vkFormat
+        4,                                              // typeSize
+        dimensions.x as u32,                            // pixelWidth
+        dimensions.y as u32,                            // pixelHeight
+        0,                                              // pixelDepth
+        0,                                              // layerCount
+        6,                                              // faceCount
+        1,                                              // levelCount
+        0,                                              // supercompressionScheme
     ]
     .into_iter()
     {

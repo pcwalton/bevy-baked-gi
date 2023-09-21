@@ -74,6 +74,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 
     // FIXME: Export a `scn.ron` from `export-blender-gi`.
 
+    /*
     commands
         .spawn(SpatialBundle {
             transform: Transform::from_scale(vec3(0.012931285, 0.008930373, 0.012931285))
@@ -82,14 +83,16 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         })
         .insert(Name::new("IrradianceVolume"))
         .insert(asset_server.load::<IrradianceVolume, _>("Sponza.voxelgi.bincode"));
+    */
 
-    let diffuse_reflection_probe_map = asset_server.load::<Image, _>("Sponza.001.ktx2");
+    let diffuse_reflection_probe_map = asset_server.load::<Image, _>("Sponza.diffuse.001.ktx2");
+    let specular_reflection_probe_map = asset_server.load::<Image, _>("Sponza.specular.001.ktx2");
     commands
         .spawn(SpatialBundle::default())
         .insert(Name::new("ReflectionProbe"))
         .insert(ReflectionProbe {
-            diffuse_map: diffuse_reflection_probe_map.clone(),
-            specular_map: diffuse_reflection_probe_map,
+            diffuse_map: diffuse_reflection_probe_map,
+            specular_map: specular_reflection_probe_map,
         });
 }
 

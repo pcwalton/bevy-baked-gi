@@ -13,6 +13,7 @@ blend = "0.8"
 byteorder = "1"
 glam = "0.24"
 itertools = "0.11"
+tempfile = "3"
 
 [dependencies.bevy-baked-gi]
 path = "../bevy-baked-gi"
@@ -20,3 +21,6 @@ path = "../bevy-baked-gi"
 [dependencies.clap]
 version = "4"
 features = ["derive"]
+
+[build-dependencies]
+cc = "1"

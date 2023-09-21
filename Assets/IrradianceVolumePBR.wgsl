@@ -4,6 +4,7 @@
 #import bevy_pbr::pbr_bindings as pbr_bindings
 #import bevy_pbr::pbr_types as pbr_types
 #import bevy_pbr::prepass_utils
+#import bevy_pbr::lighting as lighting
 
 #import bevy_pbr::mesh_bindings            mesh
 #import bevy_pbr::mesh_functions           mesh_position_local_to_clip, mesh_position_local_to_world, mesh_normal_local_to_world
@@ -13,6 +14,8 @@
 #import bevy_pbr::parallax_mapping         parallaxed_uv
 
 #import bevy_pbr::prepass_utils
+
+#import bevy_pbr::environment_map          EnvironmentMapLight
 
 #ifdef SCREEN_SPACE_AMBIENT_OCCLUSION
 #import bevy_pbr::gtao_utils gtao_multibounce
@@ -212,6 +215,47 @@ fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
 
 #endif  // FRAGMENT_IRRADIANCE_VOLUME
 
+#ifdef FRAGMENT_REFLECTION_PROBE
+
+fn reflection_probe_light(
+    perceptual_roughness: f32,
+    roughness: f32,
+    diffuse_color: vec3<f32>,
+    NdotV: f32,
+    f_ab: vec2<f32>,
+    N: vec3<f32>,
+    R: vec3<f32>,
+    F0: vec3<f32>,
+) -> EnvironmentMapLight {
+
+    // Split-sum approximation for image based lighting: https://cdn2.unrealengine.com/Resources/files/2013SiggraphPresentationsNotes-26915738.pdf
+    // Technically we could use textureNumLevels(environment_map_specular) - 1 here, but we use a uniform
+    // because textureNumLevels() does not work on WebGL2
+    let radiance_level = perceptual_roughness * 2.0;
+    let irradiance = textureSample(reflection_probe_diffuse, reflection_probe_sampler, vec3(N.xy, -N.z)).rgb;
+    let radiance = textureSampleLevel(reflection_probe_specular, reflection_probe_sampler, vec3(R.xy, -R.z), radiance_level).rgb;
+
+    // Multiscattering approximation: https://www.jcgt.org/published/0008/01/03/paper.pdf
+    // Useful reference: https://bruop.github.io/ibl
+    let Fr = max(vec3(1.0 - roughness), F0) - F0;
+    let kS = F0 + Fr * pow(1.0 - NdotV, 5.0);
+    let FssEss = kS * f_ab.x + f_ab.y;
+    let Ess = f_ab.x + f_ab.y;
+    let Ems = 1.0 - Ess;
+    let Favg = F0 + (1.0 - F0) / 21.0;
+    let Fms = FssEss * Favg / (1.0 - Ems * Favg);
+    let FmsEms = Fms * Ems;
+    let Edss = 1.0 - (FssEss + FmsEms);
+    let kD = diffuse_color * Edss;
+
+    var out: EnvironmentMapLight;
+    out.diffuse = (FmsEms + kD) * irradiance;
+    out.specular = FssEss * radiance;
+    return out;
+}
+
+#endif  // FRAGMENT_REFLECTION_PROBE
+
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
     var model = mesh.model;
@@ -245,10 +289,22 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
 #ifdef FRAGMENT_REFLECTION_PROBE
     // FIXME: This is wrong.
 #ifndef VERTEX_LIGHTMAP_UVS
+/*
     color = vec4(textureSample(
-        reflection_probe_diffuse,
+        reflection_probe_specular,
         reflection_probe_sampler,
         vec3(mesh.world_normal.xy, -mesh.world_normal.z)).rgb, 1.0);
+        */
+    let perceptual_roughness = 0.5;
+    let roughness = lighting::perceptualRoughnessToRoughness(perceptual_roughness);
+    let V = pbr_functions::calculate_view(mesh.world_position, false);
+    let N = mesh.world_normal.xyz;
+    let NdotV = max(dot(N, V), 0.0001);
+    let R = reflect(-V, N);
+    let f_ab = lighting::F_AB(perceptual_roughness, NdotV);
+    let F0 = vec3<f32>(1.0);
+    let environment_light = reflection_probe_light(perceptual_roughness, roughness, vec3<f32>(1.0), NdotV, f_ab, N, R, F0);
+    color = vec4(environment_light.diffuse + environment_light.specular, 1.0);
 #endif
 #endif
 
