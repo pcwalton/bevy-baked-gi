@@ -8,24 +8,29 @@ use bevy_baked_gi::irradiance_volumes::{
 use blend::{Blend, Instance};
 use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 use clap::Parser;
-use glam::{ivec2, uvec2, IVec2, IVec3, Mat4, UVec2, Vec3, Vec3Swizzles};
+use glam::{ivec2, uvec2, uvec3, vec3, IVec2, IVec3, Mat4, UVec2, Vec3, Vec3Swizzles};
+use std::env;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::env;
 
-const VK_FORMAT_B10G11R11_UFLOAT_PACK32: u32 = 122;
+const VK_FORMAT_R32G32B32A32_SFLOAT: u32 = 109;
 
 const KHR_DF_VERSIONNUMBER_1_3: u16 = 2;
-const DFD_DESCRIPTOR_SIZE: u16 = 24 + 16 * 3;
-const DFD_TOTAL_SIZE: u32 = 76;
+const DFD_DESCRIPTOR_SIZE: u16 = 24 + 16 * 4;
+const DFD_TOTAL_SIZE: u32 = DFD_DESCRIPTOR_SIZE as u32 + 4;
 const KHR_DF_MODEL_RGBSDA: u8 = 1;
 const KHR_DF_PRIMARIES_UNSPECIFIED: u8 = 0;
-const KHR_DF_TRANSFER_SRGB: u8 = 2;
+const KHR_DF_TRANSFER_LINEAR: u8 = 1;
 const KHR_DF_FLAG_ALPHA_STRAIGHT: u8 = 0;
+const KHR_DF_SAMPLE_DATATYPE_SIGNED: u8 = 1 << 6;
 const KHR_DF_SAMPLE_DATATYPE_FLOAT: u8 = 1 << 7;
+const KHR_DF_CHANNEL_RGBSDA_R: u32 = 0;
+const KHR_DF_CHANNEL_RGBSDA_G: u32 = 1;
+const KHR_DF_CHANNEL_RGBSDA_B: u32 = 2;
+const KHR_DF_CHANNEL_RGBSDA_A: u32 = 15;
 
 static CUBEMAP_FACES: [(usize, CubeFaceRotation); 6] = [
     (0, CubeFaceRotation::Rotate90Ccw),
@@ -179,12 +184,18 @@ fn extract_reflection_probes(light_cache_data: &Instance, output_dir: &Path, fil
     let cube_dimensions = IVec3::from_slice(&cube_texture.get_i32_vec("tex_size"));
     let cube_texture_data = cube_texture.get_u8_vec("data");
 
-    let cubemap_face_byte_size = cube_dimensions.x as usize * cube_dimensions.y as usize * 4;
-    let cubemap_byte_size = cubemap_face_byte_size * 6;
-    let cubemap_count = cube_texture_data.len() / cubemap_byte_size;
-    debug_assert_eq!(cube_texture_data.len() % cubemap_byte_size, 0);
+    let cubemap_face_byte_size_r11g11b10 =
+        cube_dimensions.x as usize * cube_dimensions.y as usize * 4;
+    let cubemap_byte_size_r11g11b10 = cubemap_face_byte_size_r11g11b10 * 6;
+    let cubemap_count = cube_texture_data.len() / cubemap_byte_size_r11g11b10;
+    debug_assert_eq!(cube_texture_data.len() % cubemap_byte_size_r11g11b10, 0);
 
-    let mut output_data = vec![0; cubemap_byte_size];
+    let cubemap_face_byte_size_rgba_f32 =
+        cube_dimensions.x as usize * cube_dimensions.y as usize * 16;
+    let cubemap_byte_size_rgba_f32 = cubemap_face_byte_size_rgba_f32 * 6;
+
+    let mut output_data = vec![0; cubemap_byte_size_rgba_f32];
+
     for cubemap_index in 0..cubemap_count {
         let mut output_path = output_dir.to_owned();
         output_path.push(&format!(
@@ -194,14 +205,6 @@ fn extract_reflection_probes(light_cache_data: &Instance, output_dir: &Path, fil
         ));
         let mut output = File::create(&output_path)
             .unwrap_or_else(|err| die(format!("Failed to create an output cubemap: {:?}", err)));
-
-        /*
-        let mut cubemap_faces = (0..6)
-            .map(|cubemap_face_index| {
-                let start = (cubemap_index * 6 + cubemap_face_index) * cubemap_face_byte_size;
-                cube_texture_data[start..(start + cubemap_face_byte_size)].to_vec()
-            })
-            .collect::<ArrayVec<_, 6>>();*/
 
         let width = cube_dimensions.x as u32;
         let height = cube_dimensions.y as u32;
@@ -257,15 +260,15 @@ fn write_ktx2(output: &mut File, texture_data: &[u8], dimensions: IVec3) -> Anyh
     println!("dimensions={:?} size={:?}", dimensions, texture_data.len());
 
     for value in [
-        VK_FORMAT_B10G11R11_UFLOAT_PACK32, // vkFormat
-        4,                                 // typeSize
-        dimensions.x as _,                 // pixelWidth
-        dimensions.y as _,                 // pixelHeight
-        0,                                 // pixelDepth
-        0,                                 // layerCount
-        6,                                 // faceCount
-        1,                                 // levelCount
-        0,                                 // supercompressionScheme
+        VK_FORMAT_R32G32B32A32_SFLOAT, // vkFormat
+        4,                             // typeSize
+        dimensions.x as _,             // pixelWidth
+        dimensions.y as _,             // pixelHeight
+        0,                             // pixelDepth
+        0,                             // layerCount
+        6,                             // faceCount
+        1,                             // levelCount
+        0,                             // supercompressionScheme
     ]
     .into_iter()
     {
@@ -314,13 +317,13 @@ fn write_ktx2(output: &mut File, texture_data: &[u8], dimensions: IVec3) -> Anyh
     output.write_all(&[
         KHR_DF_MODEL_RGBSDA,          // colorModel
         KHR_DF_PRIMARIES_UNSPECIFIED, // colorPrimaries
-        KHR_DF_TRANSFER_SRGB,         // transferFunction
+        KHR_DF_TRANSFER_LINEAR,       // transferFunction
         KHR_DF_FLAG_ALPHA_STRAIGHT,   // flags
         0,                            // texelBlockDimension0
         0,                            // texelBlockDimension1
         0,                            // texelBlockDimension2
         0,                            // texelBlockDimension3
-        4,                            // bytesPlane0
+        16,                           // bytesPlane0
         0,                            // bytesPlane1
         0,                            // bytesPlane2
         0,                            // bytesPlane3
@@ -331,22 +334,35 @@ fn write_ktx2(output: &mut File, texture_data: &[u8], dimensions: IVec3) -> Anyh
     ])?;
 
     let mut current_bit = 0;
-    for (channel, bit_length) in [(0, 11), (1, 11), (2, 10)] {
+    for &channel_type in [
+        KHR_DF_CHANNEL_RGBSDA_R,
+        KHR_DF_CHANNEL_RGBSDA_G,
+        KHR_DF_CHANNEL_RGBSDA_B,
+        KHR_DF_CHANNEL_RGBSDA_A,
+    ]
+    .iter()
+    {
+        let bit_length = 32;
         output.write_u16::<LittleEndian>(current_bit)?; // bitOffset
         output.write_all(&[
-            bit_length as u8 - 1,                           // bitLength
-            (channel as u8) | KHR_DF_SAMPLE_DATATYPE_FLOAT, // channelType
-            0,                                              // samplePosition0
-            0,                                              // samplePosition1
-            0,                                              // samplePosition2
-            0,                                              // samplePosition3
+            bit_length as u8 - 1, // bitLength
+            // channelType
+            (channel_type as u8) | KHR_DF_SAMPLE_DATATYPE_SIGNED | KHR_DF_SAMPLE_DATATYPE_FLOAT,
+            0, // samplePosition0
+            0, // samplePosition1
+            0, // samplePosition2
+            0, // samplePosition3
         ])?;
         output.write_u32::<LittleEndian>(0)?; // sampleLower
         output.write_u32::<LittleEndian>(1065353216)?; // sampleUpper
         current_bit += bit_length;
     }
 
-    let level_byte_offset = output.stream_position()?;
+    let mut level_byte_offset = output.stream_position()?;
+    while level_byte_offset % 16 != 0 {
+        output.write_all(&[0])?;
+        level_byte_offset += 1;
+    }
 
     output.write_all(texture_data)?;
 
@@ -363,15 +379,34 @@ fn cubemap_texel_byte_offset(
     cube_dimensions: UVec2,
     cubemap_index: usize,
     cubemap_face_index: usize,
+    bytes_per_pixel: usize,
     pos: UVec2,
 ) -> usize {
-    let bytes_per_face = cube_dimensions.x as usize * cube_dimensions.y as usize * 4;
+    let bytes_per_face = cube_dimensions.x as usize * cube_dimensions.y as usize * bytes_per_pixel;
     let bytes_per_cubemap = bytes_per_face * 6;
-    let stride = cube_dimensions.x as usize * 4;
+    let stride = cube_dimensions.x as usize * bytes_per_pixel;
     cubemap_index * bytes_per_cubemap
         + cubemap_face_index * bytes_per_face
         + pos.y as usize * stride
-        + pos.x as usize * 4
+        + pos.x as usize * bytes_per_pixel
+}
+
+fn cubemap_texel_byte_offset_r11g11b10(
+    cube_dimensions: UVec2,
+    cubemap_index: usize,
+    cubemap_face_index: usize,
+    pos: UVec2,
+) -> usize {
+    cubemap_texel_byte_offset(cube_dimensions, cubemap_index, cubemap_face_index, 4, pos)
+}
+
+fn cubemap_texel_byte_offset_rgba_f32(
+    cube_dimensions: UVec2,
+    cubemap_index: usize,
+    cubemap_face_index: usize,
+    pos: UVec2,
+) -> usize {
+    cubemap_texel_byte_offset(cube_dimensions, cubemap_index, cubemap_face_index, 16, pos)
 }
 
 fn get_cubemap_texel(
@@ -380,18 +415,57 @@ fn get_cubemap_texel(
     cubemap_index: usize,
     cubemap_face_index: usize,
     pos: UVec2,
-) -> u32 {
-    let start = cubemap_texel_byte_offset(cube_dimensions, cubemap_index, cubemap_face_index, pos);
-    LittleEndian::read_u32(&cubemap_data[start..(start + 4)])
+) -> Vec3 {
+    let start = cubemap_texel_byte_offset_r11g11b10(
+        cube_dimensions,
+        cubemap_index,
+        cubemap_face_index,
+        pos,
+    );
+    let packed = LittleEndian::read_u32(&cubemap_data[start..(start + 4)]);
+    let r = unpack_f11(packed & 0x7ff);
+    let g = unpack_f11((packed >> 11) & 0x7ff);
+    let b = unpack_f10(packed >> 22);
+    vec3(r, g, b)
 }
 
 fn put_cubemap_texel(
     cubemap_data: &mut [u8],
-    texel: u32,
+    texel: Vec3,
     cube_dimensions: UVec2,
     cubemap_face_index: usize,
     pos: UVec2,
 ) {
-    let start = cubemap_texel_byte_offset(cube_dimensions, 0, cubemap_face_index, pos);
-    LittleEndian::write_u32(&mut cubemap_data[start..(start + 4)], texel)
+    let start = cubemap_texel_byte_offset_rgba_f32(cube_dimensions, 0, cubemap_face_index, pos);
+    let texel = texel.extend(1.0);
+    for i in 0..4 {
+        LittleEndian::write_f32(
+            &mut cubemap_data[(start + i * 4)..(start + (i + 1) * 4)],
+            texel[i],
+        );
+    }
+}
+
+// https://registry.khronos.org/DataFormat/specs/1.3/dataformat.1.3.html#11bitfp
+fn unpack_f11(n: u32) -> f32 {
+    let x: f64 = match (n / 64, n % 64) {
+        (0, 0) => 0.0,
+        (0, m) => 2.0f64.powi(-14) * (m as f64 / 64.0),
+        (31, 0) => f64::INFINITY,
+        (31, _) => f64::NAN,
+        (e, m) => 2.0f64.powi(e as i32 - 15) * (1.0 + m as f64 / 64.0),
+    };
+    x as f32
+}
+
+// https://registry.khronos.org/DataFormat/specs/1.3/dataformat.1.3.html#10bitfp
+fn unpack_f10(n: u32) -> f32 {
+    let x: f64 = match (n / 32, n % 32) {
+        (0, 0) => 0.0,
+        (0, m) => 2.0f64.powi(-14) * (m as f64 / 32.0),
+        (31, 0) => f64::INFINITY,
+        (31, _) => f64::NAN,
+        (e, m) => 2.0f64.powi(e as i32 - 15) * (1.0 + m as f64 / 32.0),
+    };
+    x as f32
 }
