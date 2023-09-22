@@ -46,6 +46,11 @@ struct VertexOutput {
 #endif
 };
 
+struct SplitSum {
+    irradiance: vec3<f32>,
+    radiance: vec3<f32>,
+}
+
 #ifdef FRAGMENT_IRRADIANCE_VOLUME
 
 struct IrradianceData {
@@ -101,6 +106,35 @@ var reflection_probe_specular: texture_cube<f32>;
 var reflection_probe_sampler: sampler;
 #endif
 
+fn compute_ibl(
+    irradiance: vec3<f32>,
+    radiance: vec3<f32>,
+    roughness: f32,
+    diffuse_color: vec3<f32>,
+    NdotV: f32,
+    f_ab: vec2<f32>,
+    F0: vec3<f32>,
+) -> EnvironmentMapLight {
+    // Multiscattering approximation: https://www.jcgt.org/published/0008/01/03/paper.pdf
+    // Useful reference: https://bruop.github.io/ibl
+    let Fr = max(vec3(1.0 - roughness), F0) - F0;
+    let kS = F0 + Fr * pow(1.0 - NdotV, 5.0);
+    let FssEss = kS * f_ab.x + f_ab.y;
+    let Ess = f_ab.x + f_ab.y;
+    let Ems = 1.0 - Ess;
+    let Favg = F0 + (1.0 - F0) / 21.0;
+    let Fms = FssEss * Favg / (1.0 - Ems * Favg);
+    let FmsEms = Fms * Ems;
+    let Edss = 1.0 - (FssEss + FmsEms);
+    let kD = diffuse_color * Edss;
+
+    var out: EnvironmentMapLight;
+    out.diffuse = (FmsEms + kD) * irradiance;
+    out.specular = FssEss * radiance;
+    return out;
+
+}
+
 #ifdef FRAGMENT_IRRADIANCE_VOLUME
 
 fn texel_fetch(st: vec2<i32>) -> vec4<f32> {
@@ -149,9 +183,10 @@ fn eevee_irradiance_from_cell_get(cell: i32, ir_dir: vec3<f32>) -> vec3<f32> {
     return eevee_compute_irradiance(ir_dir, ir_data.cubesides);
 }
 
-fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) -> SplitSum {
     let P = to_blender_coords(p);
     let N = normalize(to_blender_coords(n));
+    let R = normalize(to_blender_coords(r));
 
     let corner = vec4(grid_data.metadata.corner, 1.0).xyz;
     let increment = vec3(
@@ -169,6 +204,7 @@ fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
 
     var weight_accum = 0.0;
     var irradiance_accum = vec3(0.0);
+    var radiance_accum = vec3(0.0);
 
     for (var i = 0; i < 8; i++) {
         let offset = vec3(i, i / 2, i / 4) & vec3(1);
@@ -182,7 +218,8 @@ fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
             grid_data.metadata.resolution.z *
             (icell_cos.y + grid_data.metadata.resolution.y * icell_cos.x);
 
-        let color = eevee_irradiance_from_cell_get(cell, N);
+        let irradiance = eevee_irradiance_from_cell_get(cell, N);
+        let radiance = eevee_irradiance_from_cell_get(cell, R);
 
         let ws_cell_location = grid_data.metadata.corner +
             (grid_data.metadata.increment_x * cell_cos.x +
@@ -198,19 +235,35 @@ fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         weight += 1.0;
 
         let trilinear = mix(1.0 - trilinear_weight, trilinear_weight, vec3<f32>(offset));
-        if (trilinear.x < 0.0 || trilinear.y < 0.0 || trilinear.z < 0.0) {
-            return vec3(1.0, 0.0, 0.0);
-        }
         weight *= trilinear.x * trilinear.y * trilinear.z;
 
         weight = max(0.00001, weight);
 
         weight_accum += weight;
-        irradiance_accum += color * weight;
+        irradiance_accum += irradiance * weight;
+        radiance_accum += radiance * weight;
     }
 
-    let rgb: vec3<f32> = irradiance_accum / weight_accum;
-    return rgb;
+    var out: SplitSum;
+    out.irradiance = irradiance_accum / weight_accum;
+    out.radiance = radiance_accum / weight_accum;
+    return out;
+}
+
+fn irradiance_volume_light(
+    perceptual_roughness: f32,
+    roughness: f32,
+    diffuse_color: vec3<f32>,
+    NdotV: f32,
+    f_ab: vec2<f32>,
+    P: vec3<f32>,
+    N: vec3<f32>,
+    R: vec3<f32>,
+    F0: vec3<f32>,
+) -> EnvironmentMapLight {
+    let split_sum = eevee_sample_irradiance_volume(P, N, R);
+    return compute_ibl(
+        split_sum.irradiance, split_sum.radiance, roughness, diffuse_color, NdotV, f_ab, F0);
 }
 
 #endif  // FRAGMENT_IRRADIANCE_VOLUME
@@ -227,7 +280,6 @@ fn reflection_probe_light(
     R: vec3<f32>,
     F0: vec3<f32>,
 ) -> EnvironmentMapLight {
-
     // Split-sum approximation for image based lighting: https://cdn2.unrealengine.com/Resources/files/2013SiggraphPresentationsNotes-26915738.pdf
     // Technically we could use textureNumLevels(environment_map_specular) - 1 here, but we use a uniform
     // because textureNumLevels() does not work on WebGL2
@@ -235,23 +287,7 @@ fn reflection_probe_light(
     let irradiance = textureSample(reflection_probe_diffuse, reflection_probe_sampler, vec3(N.xy, -N.z)).rgb;
     let radiance = textureSampleLevel(reflection_probe_specular, reflection_probe_sampler, vec3(R.xy, -R.z), radiance_level).rgb;
 
-    // Multiscattering approximation: https://www.jcgt.org/published/0008/01/03/paper.pdf
-    // Useful reference: https://bruop.github.io/ibl
-    let Fr = max(vec3(1.0 - roughness), F0) - F0;
-    let kS = F0 + Fr * pow(1.0 - NdotV, 5.0);
-    let FssEss = kS * f_ab.x + f_ab.y;
-    let Ess = f_ab.x + f_ab.y;
-    let Ems = 1.0 - Ess;
-    let Favg = F0 + (1.0 - F0) / 21.0;
-    let Fms = FssEss * Favg / (1.0 - Ems * Favg);
-    let FmsEms = Fms * Ems;
-    let Edss = 1.0 - (FssEss + FmsEms);
-    let kD = diffuse_color * Edss;
-
-    var out: EnvironmentMapLight;
-    out.diffuse = (FmsEms + kD) * irradiance;
-    out.specular = FssEss * radiance;
-    return out;
+    return compute_ibl(irradiance, radiance, roughness, diffuse_color, NdotV, f_ab, F0);
 }
 
 #endif  // FRAGMENT_REFLECTION_PROBE
@@ -259,8 +295,6 @@ fn reflection_probe_light(
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
     var model = mesh.model;
-
-    // FIXME: This isn't preserving base color for some reason.
 
     var out: VertexOutput;
     out.position = mesh_position_local_to_clip(mesh.model, vec4<f32>(vertex.position, 1.0));
@@ -282,27 +316,24 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     color *= textureSample(lightmap_texture, lightmap_sampler, lightmap_uv) * 0.00075;
 #endif
 
-#ifdef FRAGMENT_IRRADIANCE_VOLUME
-    color *= vec4(eevee_sample_irradiance_volume(mesh.world_position.xyz, mesh.world_normal), 1.0);
-#endif
-
-#ifdef FRAGMENT_REFLECTION_PROBE
-    // FIXME: This is wrong.
-#ifndef VERTEX_LIGHTMAP_UVS
-/*
-    color = vec4(textureSample(
-        reflection_probe_specular,
-        reflection_probe_sampler,
-        vec3(mesh.world_normal.xy, -mesh.world_normal.z)).rgb, 1.0);
-        */
-    let perceptual_roughness = 0.5;
+    let perceptual_roughness = 0.0;
     let roughness = lighting::perceptualRoughnessToRoughness(perceptual_roughness);
+    let P = mesh.world_position.xyz;
     let V = pbr_functions::calculate_view(mesh.world_position, false);
     let N = mesh.world_normal.xyz;
     let NdotV = max(dot(N, V), 0.0001);
     let R = reflect(-V, N);
     let f_ab = lighting::F_AB(perceptual_roughness, NdotV);
     let F0 = vec3<f32>(1.0);
+
+#ifdef FRAGMENT_IRRADIANCE_VOLUME
+    let environment_light = irradiance_volume_light(perceptual_roughness, roughness, vec3<f32>(1.0), NdotV, f_ab, P, N, R, F0);
+    color = vec4(environment_light.diffuse + environment_light.specular, 1.0);
+#endif
+
+#ifdef FRAGMENT_REFLECTION_PROBE
+    // FIXME: This is wrong.
+#ifndef VERTEX_LIGHTMAP_UVS
     let environment_light = reflection_probe_light(perceptual_roughness, roughness, vec3<f32>(1.0), NdotV, f_ab, N, R, F0);
     color = vec4(environment_light.diffuse + environment_light.specular, 1.0);
 #endif

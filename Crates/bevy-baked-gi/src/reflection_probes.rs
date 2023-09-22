@@ -1,13 +1,15 @@
 // bevy-baked-gi/Crates/bevy-baked-gi/src/reflection_probes.rs
 
 use crate::irradiance_volumes::GiPbrMaterial;
-use bevy::prelude::{Commands, Component, Entity, GlobalTransform, Handle, Image, Query, With};
-use bevy::reflect::Reflect;
+use bevy::prelude::{Commands, Component, Entity, GlobalTransform, Handle, Image, Query, With, ReflectComponent};
+use bevy::reflect::{Reflect, TypeUuid};
 use bevy::render::extract_component::ExtractComponent;
 use bevy::render::render_resource::AsBindGroup;
 
 /// The component that defines a reflection probe.
-#[derive(Component, Clone, Default, Reflect, Debug)]
+#[derive(Component, Clone, Default, Reflect, Debug, TypeUuid)]
+#[uuid = "0fb4528e-7992-41cf-a4d9-445e1fcf055e"]
+#[reflect(Component)]
 pub struct ReflectionProbe {
     pub diffuse_map: Handle<Image>,
     pub specular_map: Handle<Image>,
@@ -15,6 +17,7 @@ pub struct ReflectionProbe {
 
 /// Which reflection probe is to be applied to this entity this frame.
 #[derive(Component, Clone, Default, AsBindGroup, Reflect, Debug, ExtractComponent)]
+#[reflect(Component)]
 pub struct AppliedReflectionProbe {
     #[texture(0, dimension = "cube")]
     #[sampler(2)]

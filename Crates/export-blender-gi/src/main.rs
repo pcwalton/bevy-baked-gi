@@ -4,21 +4,36 @@ use crate::ibllib_bindings::{
     IBLLib_Distribution_GGX, IBLLib_Distribution_Lambertian, IBLLib_Result_Success,
 };
 use anyhow::Result as AnyhowResult;
+use bevy::app::AppExit;
+use bevy::asset::HandleId;
+use bevy::prelude::{
+    AddAsset, App, AppTypeRegistry, AssetPlugin, AssetServer, Assets, ComputedVisibility, Deref,
+    DerefMut, EventWriter, Handle, Image, ImagePlugin, Mesh, PostStartup, Res, ResMut, Resource,
+    Shader, SpatialBundle, Transform, World,
+};
+use bevy::reflect::erased_serde::Serialize;
+use bevy::reflect::{ReflectSerialize, TypePath, TypeUuid};
+use bevy::render::view::ViewPlugin;
+use bevy::scene::{self, DynamicScene};
+use bevy::MinimalPlugins;
 use bevy_baked_gi::irradiance_volumes::{
     IrradianceVolume, IrradianceVolumeMetadata, IRRADIANCE_GRID_BYTES_PER_CELL,
     IRRADIANCE_GRID_BYTES_PER_SAMPLE,
 };
+use bevy_baked_gi::reflection_probes::ReflectionProbe;
 use blend::{Blend, Instance};
 use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 use clap::Parser;
 use glam::{ivec2, uvec2, vec3, IVec2, IVec3, Mat4, UVec2, Vec3, Vec3Swizzles};
 use ibllib_bindings::IBLLib_OutputFormat_R32G32B32A32_SFLOAT;
+use serde_derive::Serialize;
+use std::collections::BTreeMap;
+use std::env;
 use std::ffi::{CString, OsStr};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::{env, fs};
 use tempfile::NamedTempFile;
 
 #[allow(non_upper_case_globals, non_camel_case_types, unused)]
@@ -50,7 +65,7 @@ static CUBEMAP_FACES: [(usize, CubeFaceRotation); 6] = [
     (3, CubeFaceRotation::None),
 ];
 
-#[derive(Parser)]
+#[derive(Parser, Resource, Clone)]
 #[command(author, version, about)]
 struct Args {
     #[arg()]
@@ -58,6 +73,9 @@ struct Args {
 
     #[arg(short, long)]
     out_dir: Option<PathBuf>,
+
+    #[arg(short, long)]
+    assets_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -68,17 +86,48 @@ enum CubeFaceRotation {
     Rotate90Cw,
 }
 
+struct CubemapPaths {
+    diffuse: PathBuf,
+    specular: PathBuf,
+}
+
+#[derive(Serialize, Deref, DerefMut)]
+struct Manifest(BTreeMap<HandleId, PathBuf>);
+
 fn main() {
     let args = Args::parse();
 
+    let mut bevy_app = App::new();
+    bevy_app
+        .add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin {
+            asset_folder: args.assets_dir().to_string_lossy().into_owned(),
+            watch_for_changes: None,
+        })
+        .add_asset::<Shader>()
+        .add_asset::<Mesh>()
+        .add_plugins(ViewPlugin)
+        .add_plugins(ImagePlugin::default())
+        .add_asset::<IrradianceVolume>()
+        .insert_resource(args)
+        .register_type::<Transform>()
+        .register_type::<ReflectionProbe>()
+        .register_type_data::<Transform, ReflectSerialize>()
+        .add_systems(PostStartup, go);
+
+    bevy_app.run();
+}
+
+fn go(
+    args: Res<Args>,
+    type_registry: Res<AppTypeRegistry>,
+    mut asset_server: ResMut<AssetServer>,
+    mut exit_writer: EventWriter<AppExit>,
+) {
     let mut blend_file = File::open(&args.input)
         .unwrap_or_else(|err| die(format!("Failed to open the Blender file: {:?}", err)));
 
-    let output_dir = args
-        .out_dir
-        .or_else(|| env::current_dir().ok())
-        .or_else(|| args.input.parent().map(|path| (*path).to_owned()))
-        .unwrap_or_else(|| die("Couldn't find a suitable output directory"));
+    let (output_dir, assets_dir) = (args.output_dir(), args.assets_dir());
     let filename = args.input.file_stem().expect("No file stem found");
 
     let mut blend_data = vec![];
@@ -90,17 +139,64 @@ fn main() {
     let blend = Blend::new(&blend_data[..])
         .unwrap_or_else(|err| die(format!("Failed to parse the Blender file: {:?}", err)));
 
-    let scene = blend
+    let blender_scene = blend
         .instances_with_code(*b"SC")
         .next()
         .unwrap_or_else(|| die(format!("The Blender file didn't find a scene.")));
-    let eevee = scene.get("eevee");
-    println!("eevee={:#?}", eevee);
+    let eevee = blender_scene.get("eevee");
     let light_cache_data = eevee.get("light_cache_data");
-    println!("light_cache_data={:#?}", light_cache_data);
 
-    extract_irradiance_volumes(&light_cache_data, &output_dir, filename);
-    extract_reflection_probes(&light_cache_data, &output_dir, filename);
+    let mut world = World::new();
+    world.insert_resource((*type_registry).clone());
+
+    let mut manifest = Manifest::new();
+
+    extract_irradiance_volumes(
+        &mut world,
+        &mut manifest,
+        &mut asset_server,
+        &light_cache_data,
+        &output_dir,
+        &assets_dir,
+        filename,
+    );
+
+    extract_reflection_probes(
+        &mut world,
+        &mut manifest,
+        &mut asset_server,
+        &light_cache_data,
+        &output_dir,
+        &assets_dir,
+        filename,
+    );
+
+    // Write scene.
+    let bevy_scene = DynamicScene::from_world(&world);
+    let scene_output_path = output_dir.join(format!("{}.scn.ron", filename.to_string_lossy()));
+    let serialized_scene = bevy_scene
+        .serialize_ron(world.resource::<AppTypeRegistry>())
+        .unwrap_or_else(|err| die(format!("Failed to serialize the Bevy scene: {:?}", err)));
+    fs::write(scene_output_path, serialized_scene.as_bytes()).unwrap_or_else(|err| {
+        die(format!(
+            "Failed to write the serialized Bevy scene: {:?}",
+            err
+        ))
+    });
+
+    // Write manifest.
+    let manifest_output_path =
+        output_dir.join(format!("{}.manifest.ron", filename.to_string_lossy()));
+    let serialized_manifest = scene::serialize_ron(manifest)
+        .unwrap_or_else(|err| die(format!("Failed to serialize the manifest: {:?}", err)));
+    fs::write(manifest_output_path, serialized_manifest.as_bytes()).unwrap_or_else(|err| {
+        die(format!(
+            "Failed to write the serialized manifest: {:?}",
+            err
+        ))
+    });
+
+    exit_writer.send(AppExit);
 }
 
 fn die(message: impl AsRef<str>) -> ! {
@@ -108,7 +204,34 @@ fn die(message: impl AsRef<str>) -> ! {
     process::exit(1)
 }
 
-fn extract_irradiance_volumes(light_cache_data: &Instance, output_dir: &Path, filename: &OsStr) {
+impl Args {
+    fn output_dir(&self) -> PathBuf {
+        if let Some(ref out_dir) = self.out_dir {
+            return out_dir.to_owned();
+        }
+        if let Ok(current_dir) = env::current_dir() {
+            return current_dir;
+        }
+        if let Some(parent_dir) = self.input.parent() {
+            return parent_dir.to_owned();
+        }
+        die("Couldn't find a suitable output directory");
+    }
+
+    fn assets_dir(&self) -> PathBuf {
+        self.assets_dir.clone().unwrap_or_else(|| self.output_dir())
+    }
+}
+
+fn extract_irradiance_volumes(
+    world: &mut World,
+    manifest: &mut Manifest,
+    asset_server: &mut AssetServer,
+    light_cache_data: &Instance,
+    output_dir: &Path,
+    assets_dir: &Path,
+    filename: &OsStr,
+) {
     let grid_texture = light_cache_data.get("grid_tx");
     let grid_texture_data = grid_texture.get_u8_vec("data");
 
@@ -153,18 +276,10 @@ fn extract_irradiance_volumes(light_cache_data: &Instance, output_dir: &Path, fi
         }
     }
 
-    println!("meta={:#?}", meta);
-
     let irradiance_volume = IrradianceVolume {
         meta,
         data: grid_sample_data,
     };
-
-    println!(
-        "matrix={:#?}",
-        Mat4::from_cols_slice(&grid_data.get_f32_vec("mat"))
-    );
-    println!("offset={}", grid_data.get_i32("offset"));
 
     let mut output_path = output_dir.to_owned();
     output_path.push(filename);
@@ -178,6 +293,17 @@ fn extract_irradiance_volumes(light_cache_data: &Instance, output_dir: &Path, fi
             err
         ))
     });
+
+    let irradiance_volume_handle =
+        manifest.add::<IrradianceVolume>(&output_path, assets_dir, asset_server);
+
+    world
+        .spawn(irradiance_volume_handle)
+        .insert(SpatialBundle {
+            transform: Transform::from_matrix(Mat4::from_cols_slice(&grid_data.get_f32_vec("mat"))),
+            ..SpatialBundle::default()
+        })
+        .remove::<ComputedVisibility>();
 }
 
 /// `stride` is in bytes.
@@ -186,34 +312,54 @@ fn get_texel(buffer: &[u8], p: IVec2, stride: usize) -> [u8; 4] {
     buffer[offset..offset + 4].try_into().unwrap()
 }
 
-fn extract_reflection_probes(light_cache_data: &Instance, output_dir: &Path, filename: &OsStr) {
+fn extract_reflection_probes(
+    world: &mut World,
+    manifest: &mut Manifest,
+    asset_server: &mut AssetServer,
+    light_cache_data: &Instance,
+    output_dir: &Path,
+    assets_dir: &Path,
+    filename: &OsStr,
+) {
     let cube_texture = light_cache_data.get("cube_tx");
-
     let cube_dimensions = IVec3::from_slice(&cube_texture.get_i32_vec("tex_size"));
     let cube_texture_data = cube_texture.get_u8_vec("data");
+
+    let cube_data = light_cache_data.get_iter("cube_data").collect::<Vec<_>>();
 
     let cubemap_face_byte_size_r11g11b10 =
         cube_dimensions.x as usize * cube_dimensions.y as usize * 4;
     let cubemap_byte_size_r11g11b10 = cubemap_face_byte_size_r11g11b10 * 6;
     let cubemap_count = cube_texture_data.len() / cubemap_byte_size_r11g11b10;
     debug_assert_eq!(cube_texture_data.len() % cubemap_byte_size_r11g11b10, 0);
+    debug_assert_eq!(cubemap_count, cube_data.len());
 
-    for cubemap_index in 0..cubemap_count {
+    for (cubemap_index, cube_data) in cube_data.iter().enumerate() {
         extract_single_reflection_probe(
+            world,
+            manifest,
+            asset_server,
+            cube_data,
             cubemap_index,
             cube_dimensions,
             &cube_texture_data,
             output_dir,
+            assets_dir,
             filename,
         );
     }
 }
 
 fn extract_single_reflection_probe(
+    world: &mut World,
+    manifest: &mut Manifest,
+    asset_server: &mut AssetServer,
+    light_cache_data: &Instance,
     cubemap_index: usize,
     cube_dimensions: IVec3,
     cube_texture_data: &[u8],
     output_dir: &Path,
+    assets_dir: &Path,
     filename: &OsStr,
 ) {
     let cubemap_face_byte_size_rgba_f32 =
@@ -272,6 +418,40 @@ fn extract_single_reflection_probe(
     let lut = NamedTempFile::new().expect("Failed to create temporary file for the LUT");
     let (_, lut_path) = lut.keep().unwrap();
 
+    let cubemap_paths = sample_cubemap(
+        cubemap_index,
+        height,
+        raw_cubemap_path,
+        lut_path,
+        output_dir,
+        filename,
+    );
+
+    let diffuse_map = manifest.add(&cubemap_paths.diffuse, assets_dir, asset_server);
+    let specular_map = manifest.add(&cubemap_paths.specular, assets_dir, asset_server);
+
+    world
+        .spawn(ReflectionProbe {
+            diffuse_map,
+            specular_map,
+        })
+        .insert(SpatialBundle {
+            transform: Transform::from_translation(
+                Vec3::from_slice(&light_cache_data.get_f32_vec("position")).xzy(),
+            ),
+            ..SpatialBundle::default()
+        })
+        .remove::<ComputedVisibility>();
+}
+
+fn sample_cubemap(
+    cubemap_index: usize,
+    height: u32,
+    raw_cubemap_path: PathBuf,
+    lut_path: PathBuf,
+    output_dir: &Path,
+    filename: &OsStr,
+) -> CubemapPaths {
     let output_path = output_dir.to_owned();
     let diffuse_output_path = output_path.join(format!(
         "{}.diffuse.{:0>3}.ktx2",
@@ -321,6 +501,11 @@ fn extract_single_reflection_probe(
 
     let _ = fs::remove_file(lut_path);
     let _ = fs::remove_file(raw_cubemap_path);
+
+    CubemapPaths {
+        diffuse: diffuse_output_path,
+        specular: specular_output_path,
+    }
 }
 
 fn write_ktx2<F>(output: &mut F, texture_data: &[u8], dimensions: IVec3) -> AnyhowResult<()>
@@ -330,8 +515,6 @@ where
     output.write_all(&[
         0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A,
     ])?;
-
-    println!("dimensions={:?} size={:?}", dimensions, texture_data.len());
 
     for value in [
         IBLLib_OutputFormat_R32G32B32A32_SFLOAT as u32, // vkFormat
@@ -542,4 +725,40 @@ fn unpack_f10(n: u32) -> f32 {
         (e, m) => 2.0f64.powi(e as i32 - 15) * (1.0 + m as f64 / 32.0),
     };
     x as f32
+}
+
+fn asset_dir_relative(path: &Path, assets_dir: &Path) -> PathBuf {
+    if let Some(diffed) = pathdiff::diff_paths(path, assets_dir) {
+        return diffed;
+    }
+
+    eprintln!(
+        "warning: asset `{}` isn't relative to the assets directory `{}`; using an absolute \
+path instead",
+        path.display(),
+        assets_dir.display()
+    );
+
+    fs::canonicalize(path).unwrap()
+}
+
+impl Manifest {
+    fn new() -> Manifest {
+        Manifest(BTreeMap::new())
+    }
+
+    fn add<T>(
+        &mut self,
+        path: &Path,
+        assets_dir: &Path,
+        asset_server: &mut AssetServer,
+    ) -> Handle<T>
+    where
+        T: TypePath + TypeUuid + Send + Sync,
+    {
+        let asset_dir_relative_path = asset_dir_relative(path, assets_dir);
+        let handle = asset_server.load::<T, _>(&*asset_dir_relative_path);
+        self.insert(handle.id(), asset_dir_relative_path);
+        handle
+    }
 }

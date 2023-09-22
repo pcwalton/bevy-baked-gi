@@ -54,6 +54,7 @@ use bevy::render::{ExtractSchedule, Render, RenderApp, RenderSet};
 use bevy::scene::Scene;
 use bevy::transform::TransformSystem;
 use bevy::utils::HashMap;
+use reflection_probes::ReflectionProbe;
 use serde_json::{Error as SerdeJsonError, Value};
 use std::path::PathBuf;
 use thiserror::Error as Thiserror;
@@ -148,6 +149,7 @@ impl Plugin for BakedGiPlugin {
             .register_type::<Lightmapped>()
             .register_type::<GltfGiSettings>()
             .register_type::<GltfLightmapSettings>()
+            .register_type::<ReflectionProbe>()
             .add_asset::<IrradianceVolume>()
             .add_asset::<GiPbrMaterial>()
             .add_asset::<LightmapUvs>()
