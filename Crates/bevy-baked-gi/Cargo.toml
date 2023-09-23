@@ -18,7 +18,9 @@ thiserror = "1"
 
 [dev-dependencies]
 bevy_egui = "0.21"
+clap = "4"
 egui = "0.22"
+ron = "0.8"
 
 [dev-dependencies.bevy-view-controls-egui]
 path = "../../../bevy-view-controls-egui"

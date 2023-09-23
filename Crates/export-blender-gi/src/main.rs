@@ -5,13 +5,11 @@ use crate::ibllib_bindings::{
 };
 use anyhow::Result as AnyhowResult;
 use bevy::app::AppExit;
-use bevy::asset::HandleId;
 use bevy::prelude::{
-    AddAsset, App, AppTypeRegistry, AssetPlugin, AssetServer, Assets, ComputedVisibility, Deref,
-    DerefMut, EventWriter, Handle, Image, ImagePlugin, Mesh, PostStartup, Res, ResMut, Resource,
-    Shader, SpatialBundle, Transform, World,
+    AddAsset, App, AppTypeRegistry, AssetPlugin, AssetServer, ComputedVisibility, EventWriter,
+    Handle, ImagePlugin, Mesh, PostStartup, Res, ResMut, Resource, Shader, SpatialBundle,
+    Transform, World, GlobalTransform,
 };
-use bevy::reflect::erased_serde::Serialize;
 use bevy::reflect::{ReflectSerialize, TypePath, TypeUuid};
 use bevy::render::view::ViewPlugin;
 use bevy::scene::{self, DynamicScene};
@@ -21,13 +19,12 @@ use bevy_baked_gi::irradiance_volumes::{
     IRRADIANCE_GRID_BYTES_PER_SAMPLE,
 };
 use bevy_baked_gi::reflection_probes::ReflectionProbe;
+use bevy_baked_gi::Manifest;
 use blend::{Blend, Instance};
 use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 use clap::Parser;
 use glam::{ivec2, uvec2, vec3, IVec2, IVec3, Mat4, UVec2, Vec3, Vec3Swizzles};
 use ibllib_bindings::IBLLib_OutputFormat_R32G32B32A32_SFLOAT;
-use serde_derive::Serialize;
-use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{CString, OsStr};
 use std::fs::{self, File};
@@ -91,9 +88,6 @@ struct CubemapPaths {
     specular: PathBuf,
 }
 
-#[derive(Serialize, Deref, DerefMut)]
-struct Manifest(BTreeMap<HandleId, PathBuf>);
-
 fn main() {
     let args = Args::parse();
 
@@ -111,6 +105,7 @@ fn main() {
         .add_asset::<IrradianceVolume>()
         .insert_resource(args)
         .register_type::<Transform>()
+        .register_type::<GlobalTransform>()
         .register_type::<ReflectionProbe>()
         .register_type_data::<Transform, ReflectSerialize>()
         .add_systems(PostStartup, go);
@@ -294,8 +289,8 @@ fn extract_irradiance_volumes(
         ))
     });
 
-    let irradiance_volume_handle =
-        manifest.add::<IrradianceVolume>(&output_path, assets_dir, asset_server);
+    let irradiance_volume_handle: Handle<IrradianceVolume> =
+        add_to_manifest(manifest, &output_path, assets_dir, asset_server);
 
     world
         .spawn(irradiance_volume_handle)
@@ -427,8 +422,8 @@ fn extract_single_reflection_probe(
         filename,
     );
 
-    let diffuse_map = manifest.add(&cubemap_paths.diffuse, assets_dir, asset_server);
-    let specular_map = manifest.add(&cubemap_paths.specular, assets_dir, asset_server);
+    let diffuse_map = add_to_manifest(manifest, &cubemap_paths.diffuse, assets_dir, asset_server);
+    let specular_map = add_to_manifest(manifest, &cubemap_paths.specular, assets_dir, asset_server);
 
     world
         .spawn(ReflectionProbe {
@@ -742,23 +737,17 @@ path instead",
     fs::canonicalize(path).unwrap()
 }
 
-impl Manifest {
-    fn new() -> Manifest {
-        Manifest(BTreeMap::new())
-    }
-
-    fn add<T>(
-        &mut self,
-        path: &Path,
-        assets_dir: &Path,
-        asset_server: &mut AssetServer,
-    ) -> Handle<T>
-    where
-        T: TypePath + TypeUuid + Send + Sync,
-    {
-        let asset_dir_relative_path = asset_dir_relative(path, assets_dir);
-        let handle = asset_server.load::<T, _>(&*asset_dir_relative_path);
-        self.insert(handle.id(), asset_dir_relative_path);
-        handle
-    }
+fn add_to_manifest<T>(
+    manifest: &mut Manifest,
+    path: &Path,
+    assets_dir: &Path,
+    asset_server: &mut AssetServer,
+) -> Handle<T>
+where
+    T: TypePath + TypeUuid + Send + Sync,
+{
+    let asset_dir_relative_path = asset_dir_relative(path, assets_dir);
+    let handle = asset_server.load::<T, _>(&*asset_dir_relative_path);
+    manifest.insert(handle.id(), asset_dir_relative_path);
+    handle
 }

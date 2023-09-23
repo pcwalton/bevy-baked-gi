@@ -134,12 +134,13 @@ pub fn update_irradiance_grid(
         return;
     }
 
-    info!("Regenerating irradiance grid");
-
     let (mut current_offset, mut new_gpu_data, mut irradiance_volume_handles) = (0, vec![], vec![]);
     for (irradiance_volume_handle, transform) in irradiance_volumes_query.iter_mut() {
         let Some(irradiance_volume) =
-            irradiance_volume_assets.get(irradiance_volume_handle) else { continue };
+            irradiance_volume_assets.get(irradiance_volume_handle) else {
+                println!("Couldn't find irradiance volume asset!");
+                continue
+            };
 
         new_gpu_data.push(IrradianceVolumeDescriptor {
             meta: irradiance_volume.meta.clone(),
@@ -160,6 +161,8 @@ pub fn update_irradiance_grid(
     if current_offset == 0 {
         return;
     }
+
+    info!("Regenerating irradiance grid");
 
     // FIXME: Pick this dynamically.
     let dest_width = 768;

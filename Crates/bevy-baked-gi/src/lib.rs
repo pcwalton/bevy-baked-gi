@@ -13,6 +13,7 @@ use crate::lightmaps::{
 };
 use crate::reflection_probes::AppliedReflectionProbe;
 use arrayvec::ArrayVec;
+use bevy::asset::HandleId;
 use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d, Transparent3d};
 use bevy::core_pipeline::experimental::taa::TemporalAntiAliasSettings;
 use bevy::core_pipeline::prepass::NormalPrepass;
@@ -29,10 +30,10 @@ use bevy::pbr::{
     SetMeshViewBindGroup, Shadow,
 };
 use bevy::prelude::{
-    error, info, warn, AddAsset, AlphaMode, App, AssetEvent, Assets, Children, Commands, Component,
-    Entity, EnvironmentMapLight, EventReader, FromWorld, Handle, Image, IntoSystemConfigs, Mesh,
-    Msaa, Name, Plugin, PostUpdate, Query, Rect, Res, ResMut, Resource, StandardMaterial, Update,
-    Vec2, With, Without, World,
+    error, info, warn, AddAsset, AlphaMode, App, AssetEvent, AssetServer, Assets, Children,
+    Commands, Component, Deref, DerefMut, Entity, EnvironmentMapLight, EventReader, FromWorld,
+    Handle, HandleUntyped, Image, IntoSystemConfigs, Mesh, Msaa, Name, Plugin, PostUpdate, Query,
+    Rect, Res, ResMut, Resource, StandardMaterial, Update, Vec2, With, Without, World,
 };
 use bevy::reflect::Reflect;
 use bevy::render::extract_component::ExtractComponentPlugin;
@@ -43,9 +44,8 @@ use bevy::render::render_phase::{
     SetItemPipeline, TrackedRenderPass,
 };
 use bevy::render::render_resource::{
-    AsBindGroup, AsBindGroupError, BindGroupLayout, PipelineCache, PreparedBindGroup,
-    RenderPipelineDescriptor, SpecializedMeshPipeline, SpecializedMeshPipelineError,
-    SpecializedMeshPipelines,
+    AsBindGroup, BindGroupLayout, PipelineCache, PreparedBindGroup, RenderPipelineDescriptor,
+    SpecializedMeshPipeline, SpecializedMeshPipelineError, SpecializedMeshPipelines,
 };
 use bevy::render::renderer::RenderDevice;
 use bevy::render::texture::{CompressedImageFormats, FallbackImage};
@@ -55,7 +55,9 @@ use bevy::scene::Scene;
 use bevy::transform::TransformSystem;
 use bevy::utils::HashMap;
 use reflection_probes::ReflectionProbe;
+use serde::{Deserialize, Serialize};
 use serde_json::{Error as SerdeJsonError, Value};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use thiserror::Error as Thiserror;
 
@@ -80,16 +82,16 @@ pub struct GiPbrPipeline {
 #[derive(Component)]
 pub struct RenderGiPbrData {
     pub lighting: PreparedBindGroup<()>,
-    pub reflection_probe: Option<PreparedBindGroup<()>>,
 }
 
-pub struct SetGiPbrBindGroup<const I: usize, const J: usize>;
+pub struct SetGiPbrBindGroup<const I: usize>;
 
-#[derive(Clone, Copy, Default, Debug, Reflect, PartialEq, Eq, Hash)]
-pub enum LightingType {
-    #[default]
-    Dynamic,
+#[derive(Clone, Copy, Debug, Reflect, PartialEq, Eq, Hash)]
+pub enum GiType {
+    NoGi,
     Lightmapped,
+    ReflectionProbe,
+    IrradianceVolume,
 }
 
 pub type DrawGiPbrMaterial = (
@@ -97,15 +99,14 @@ pub type DrawGiPbrMaterial = (
     SetMeshViewBindGroup<0>,
     SetMaterialBindGroup<GiPbrMaterial, 1>,
     SetMeshBindGroup<2>,
-    SetGiPbrBindGroup<3, 4>,
+    SetGiPbrBindGroup<3>,
     DrawMesh,
 );
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct GiPbrPipelineKey {
     pub material: MaterialPipelineKey<GiPbrMaterial>,
-    pub lighting: LightingType,
-    pub has_reflection_probe: bool,
+    pub lighting: GiType,
 }
 
 /// Settings that can be present in glTF files as glTF extras.
@@ -137,6 +138,9 @@ numeric"
     )]
     MalformedLightmapCoords,
 }
+
+#[derive(Serialize, Deserialize, Deref, DerefMut)]
+pub struct Manifest(pub BTreeMap<HandleId, PathBuf>);
 
 impl Plugin for BakedGiPlugin {
     fn build(&self, app: &mut App) {
@@ -268,52 +272,34 @@ pub fn prepare_gi_pbr_meshes(
             continue;
         };
 
-        let maybe_lighting_bind_group = match maybe_lightmap {
-            Some(lightmap) if mesh.layout.contains(LIGHTMAP_UV_ATTRIBUTE.clone()) => lightmap
+        let maybe_lighting_bind_group = match (maybe_lightmap, maybe_reflection_probe) {
+            (Some(lightmap), _) if mesh.layout.contains(LIGHTMAP_UV_ATTRIBUTE.clone()) => lightmap
                 .as_bind_group(
                     &pipeline.lightmap_bind_group_layout,
                     &render_device,
                     &images,
                     &fallback_image,
                 ),
-            _ => {
-                /*panic!(
-                    "This should never happen -- lightmap present? {:?}",
-                    maybe_lightmap.is_some()
-                )*/
-                maybe_irradiance_volume_info
-                    .cloned()
-                    .unwrap_or_default()
-                    .as_bind_group(
-                        &pipeline.irradiance_volume_bind_group_layout,
-                        &render_device,
-                        &images,
-                        &fallback_image,
-                    )
-            }
-        };
-
-        let maybe_reflection_probe_bind_group = match maybe_reflection_probe {
-            Some(reflection_probe) => {
-                match reflection_probe.as_bind_group(
-                    &pipeline.reflection_probe_bind_group_layout,
+            (_, Some(reflection_probe)) => reflection_probe.as_bind_group(
+                &pipeline.reflection_probe_bind_group_layout,
+                &render_device,
+                &images,
+                &fallback_image,
+            ),
+            _ => maybe_irradiance_volume_info
+                .cloned()
+                .unwrap_or_default()
+                .as_bind_group(
+                    &pipeline.irradiance_volume_bind_group_layout,
                     &render_device,
                     &images,
                     &fallback_image,
-                ) {
-                    Ok(reflection_probe_bind_group) => Some(reflection_probe_bind_group),
-                    Err(AsBindGroupError::RetryNextUpdate) => continue,
-                }
-            }
-            None => None,
+                ),
         };
 
-        match (maybe_lighting_bind_group, maybe_reflection_probe_bind_group) {
-            (Ok(lighting), reflection_probe) => {
-                commands.entity(entity).insert(RenderGiPbrData {
-                    lighting,
-                    reflection_probe,
-                });
+        match maybe_lighting_bind_group {
+            Ok(lighting) => {
+                commands.entity(entity).insert(RenderGiPbrData { lighting });
             }
             _ => {
                 warn!("Failed to create bind group for globally-illuminated PBR material");
@@ -468,12 +454,12 @@ pub fn queue_gi_pbr_material_meshes(
                     let lighting_type = if maybe_lightmap.is_some()
                         && mesh.layout.contains(LIGHTMAP_UV_ATTRIBUTE.clone())
                     {
-                        LightingType::Lightmapped
+                        GiType::Lightmapped
+                    } else if maybe_reflection_probe.is_some() {
+                        GiType::ReflectionProbe
                     } else {
-                        LightingType::Dynamic
+                        GiType::IrradianceVolume
                     };
-
-                    let has_reflection_probe = maybe_reflection_probe.is_some();
 
                     // Specialize the pipeline.
 
@@ -486,7 +472,6 @@ pub fn queue_gi_pbr_material_meshes(
                                 bind_group_data: material.key,
                             },
                             lighting: lighting_type,
-                            has_reflection_probe,
                         },
                         &mesh.layout,
                     );
@@ -562,18 +547,6 @@ impl SpecializedMeshPipeline for GiPbrPipeline {
     ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
         let mut descriptor = self.material_pipeline.specialize(key.material, layout)?;
 
-        if key.lighting == LightingType::Dynamic {
-            descriptor
-                .vertex
-                .shader_defs
-                .push("FRAGMENT_IRRADIANCE_VOLUME".into());
-            if let Some(ref mut fragment) = descriptor.fragment {
-                fragment
-                    .shader_defs
-                    .push("FRAGMENT_IRRADIANCE_VOLUME".into());
-            }
-        }
-
         // This is copy-and-pasted from `bevy_pbr::render::mesh::MeshPipeline::specialize`.
         let mut vertex_attributes = vec![];
         if layout.contains(Mesh::ATTRIBUTE_POSITION) {
@@ -592,53 +565,44 @@ impl SpecializedMeshPipeline for GiPbrPipeline {
             vertex_attributes.push(Mesh::ATTRIBUTE_COLOR.at_shader_location(4));
         }
 
-        if key.lighting == LightingType::Lightmapped {
-            descriptor
-                .vertex
-                .shader_defs
-                .push("VERTEX_LIGHTMAP_UVS".into());
-            if let Some(ref mut fragment) = descriptor.fragment {
-                fragment.shader_defs.push("VERTEX_LIGHTMAP_UVS".into());
+        let maybe_define = match key.lighting {
+            GiType::NoGi => None,
+            GiType::Lightmapped => {
+                vertex_attributes.push(LIGHTMAP_UV_ATTRIBUTE.at_shader_location(5));
+                Some("VERTEX_LIGHTMAP_UVS")
             }
+            GiType::ReflectionProbe => Some("FRAGMENT_REFLECTION_PROBE"),
+            GiType::IrradianceVolume => Some("FRAGMENT_IRRADIANCE_VOLUME"),
+        };
 
-            vertex_attributes.push(LIGHTMAP_UV_ATTRIBUTE.at_shader_location(5));
-        }
-
-        if key.has_reflection_probe {
-            descriptor
-                .vertex
-                .shader_defs
-                .push("FRAGMENT_REFLECTION_PROBE".into());
+        if let Some(define) = maybe_define {
+            descriptor.vertex.shader_defs.push(define.into());
             if let Some(ref mut fragment) = descriptor.fragment {
-                fragment
-                    .shader_defs
-                    .push("FRAGMENT_REFLECTION_PROBE".into());
+                fragment.shader_defs.push(define.into());
             }
         }
 
         let vertex_layout = layout.get_layout(&vertex_attributes).unwrap();
         descriptor.vertex.buffers = vec![vertex_layout];
 
-        // Push either the irradiance volume or lightmap bind group.
+        // Push the appropriate bind group.
         let gi_bind_group_layout = match key.lighting {
-            LightingType::Dynamic => self.irradiance_volume_bind_group_layout.clone(),
-            LightingType::Lightmapped => self.lightmap_bind_group_layout.clone(),
+            GiType::NoGi => None,
+            GiType::ReflectionProbe => Some(self.reflection_probe_bind_group_layout.clone()),
+            GiType::IrradianceVolume => Some(self.irradiance_volume_bind_group_layout.clone()),
+            GiType::Lightmapped => Some(self.lightmap_bind_group_layout.clone()),
         };
-        debug_assert_eq!(descriptor.layout.len(), 3);
-        descriptor.layout.push(gi_bind_group_layout);
 
-        // Push the reflection probe bind group if applicable.
-        if key.has_reflection_probe {
-            descriptor
-                .layout
-                .push(self.reflection_probe_bind_group_layout.clone());
+        if let Some(gi_bind_group_layout) = gi_bind_group_layout {
+            debug_assert_eq!(descriptor.layout.len(), 3);
+            descriptor.layout.push(gi_bind_group_layout);
         }
 
         Ok(descriptor)
     }
 }
 
-impl<P, const I: usize, const J: usize> RenderCommand<P> for SetGiPbrBindGroup<I, J>
+impl<P, const I: usize> RenderCommand<P> for SetGiPbrBindGroup<I>
 where
     P: PhaseItem,
 {
@@ -658,9 +622,6 @@ where
             None => RenderCommandResult::Failure,
             Some(gi_pbr_data) => {
                 pass.set_bind_group(I, &gi_pbr_data.lighting.bind_group, &[]);
-                if let Some(ref reflection_probe) = gi_pbr_data.reflection_probe {
-                    pass.set_bind_group(J, &reflection_probe.bind_group, &[]);
-                }
                 RenderCommandResult::Success
             }
         }
@@ -799,5 +760,27 @@ impl GltfGiSettings {
         }
 
         Ok(())
+    }
+}
+
+impl Manifest {
+    pub fn new() -> Manifest {
+        Manifest(BTreeMap::new())
+    }
+
+    pub fn load_all(&self, asset_server: &mut AssetServer) -> HashMap<HandleId, HandleUntyped> {
+        self.iter()
+            .map(|(handle_id, path)| {
+                let handle = asset_server.load_untyped(&**path);
+                debug_assert_eq!(handle.id(), *handle_id);
+                (*handle_id, handle)
+            })
+            .collect()
+    }
+}
+
+impl Default for Manifest {
+    fn default() -> Self {
+        Self::new()
     }
 }

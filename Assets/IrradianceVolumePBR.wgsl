@@ -98,11 +98,11 @@ var<uniform> lightmap_uv_rect: vec4<f32>;
 #endif
 
 #ifdef FRAGMENT_REFLECTION_PROBE
-@group(4) @binding(0)
+@group(3) @binding(0)
 var reflection_probe_diffuse: texture_cube<f32>;
-@group(4) @binding(1)
+@group(3) @binding(1)
 var reflection_probe_specular: texture_cube<f32>;
-@group(4) @binding(2)
+@group(3) @binding(2)
 var reflection_probe_sampler: sampler;
 #endif
 
@@ -332,11 +332,8 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
 #endif
 
 #ifdef FRAGMENT_REFLECTION_PROBE
-    // FIXME: This is wrong.
-#ifndef VERTEX_LIGHTMAP_UVS
     let environment_light = reflection_probe_light(perceptual_roughness, roughness, vec3<f32>(1.0), NdotV, f_ab, N, R, F0);
     color = vec4(environment_light.diffuse + environment_light.specular, 1.0);
-#endif
 #endif
 
     return color;
