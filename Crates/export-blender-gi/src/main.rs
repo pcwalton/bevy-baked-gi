@@ -7,8 +7,8 @@ use anyhow::Result as AnyhowResult;
 use bevy::app::AppExit;
 use bevy::prelude::{
     AddAsset, App, AppTypeRegistry, AssetPlugin, AssetServer, ComputedVisibility, EventWriter,
-    Handle, ImagePlugin, Mesh, PostStartup, Res, ResMut, Resource, Shader, SpatialBundle,
-    Transform, World, GlobalTransform,
+    GlobalTransform, Handle, ImagePlugin, Mesh, PostStartup, Res, ResMut, Resource, Shader,
+    SpatialBundle, Transform, World,
 };
 use bevy::reflect::{ReflectSerialize, TypePath, TypeUuid};
 use bevy::render::view::ViewPlugin;
@@ -23,7 +23,7 @@ use bevy_baked_gi::Manifest;
 use blend::{Blend, Instance};
 use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 use clap::Parser;
-use glam::{ivec2, uvec2, vec3, IVec2, IVec3, Mat4, UVec2, Vec3, Vec3Swizzles};
+use glam::{ivec2, uvec2, vec3, IVec2, IVec3, Mat4, UVec2, Vec3, Vec3Swizzles, Vec4};
 use ibllib_bindings::IBLLib_OutputFormat_R32G32B32A32_SFLOAT;
 use std::env;
 use std::ffi::{CString, OsStr};
@@ -234,71 +234,80 @@ fn extract_irradiance_volumes(
     let cells_per_row = grid_dimensions.x / 3;
     let grid_stride = grid_dimensions.x as usize * IRRADIANCE_GRID_BYTES_PER_SAMPLE;
 
-    let Some(grid_data) = light_cache_data
-        .get_iter("grid_data")
-        .find(|grid_data| grid_data.get_i32_vec("resolution")[0] > 0) else { return };
+    for grid_data in light_cache_data.get_iter("grid_data") {
+        let resolution = IVec3::from_slice(&grid_data.get_i32_vec("resolution"));
 
-    let meta = IrradianceVolumeMetadata {
-        resolution: IVec3::from_slice(&grid_data.get_i32_vec("resolution")),
-        corner: Vec3::from_slice(&grid_data.get_f32_vec("corner")),
-        increment_x: Vec3::from_slice(&grid_data.get_f32_vec("increment_x")),
-        increment_y: Vec3::from_slice(&grid_data.get_f32_vec("increment_y")),
-        increment_z: Vec3::from_slice(&grid_data.get_f32_vec("increment_z")),
-        level_bias: grid_data.get_f32("level_bias"),
-    };
+        // There seems to always be a dummy irradiance volume present with a resolution of zero.
+        // Ignore it.
+        if resolution.x == 0 {
+            continue;
+        }
 
-    let offset = grid_data.get_i32("offset");
+        let meta = IrradianceVolumeMetadata {
+            resolution,
+            corner: Vec3::from_slice(&grid_data.get_f32_vec("corner")),
+            increment_x: Vec3::from_slice(&grid_data.get_f32_vec("increment_x")),
+            increment_y: Vec3::from_slice(&grid_data.get_f32_vec("increment_y")),
+            increment_z: Vec3::from_slice(&grid_data.get_f32_vec("increment_z")),
+            level_bias: grid_data.get_f32("level_bias"),
+        };
 
-    // Extract the relevant portion of the first layer of the texture. (The rest of the texture
-    // contains shadow maps used for visibility, which we don't care about presently.)
+        let offset = grid_data.get_i32("offset");
 
-    let sample_count: usize = meta.sample_count();
-    let mut grid_sample_data = Vec::with_capacity(sample_count * IRRADIANCE_GRID_BYTES_PER_CELL);
-    for sample_index in 0..(sample_count as i32) {
-        let src_sample_index = sample_index + offset;
-        let origin = ivec2(
-            src_sample_index % cells_per_row * 3,
-            src_sample_index / cells_per_row * 2,
-        );
-        for y in 0..2 {
-            for x in 0..3 {
-                grid_sample_data.extend_from_slice(&get_texel(
-                    &grid_texture_data,
-                    origin + ivec2(x, y),
-                    grid_stride,
-                ));
+        // Extract the relevant portion of the first layer of the texture. (The rest of the texture
+        // contains shadow maps used for visibility, which we don't care about presently.)
+
+        let sample_count: usize = meta.sample_count();
+        let mut grid_sample_data =
+            Vec::with_capacity(sample_count * IRRADIANCE_GRID_BYTES_PER_CELL);
+        for sample_index in 0..(sample_count as i32) {
+            let src_sample_index = sample_index + offset;
+            let origin = ivec2(
+                src_sample_index % cells_per_row * 3,
+                src_sample_index / cells_per_row * 2,
+            );
+            for y in 0..2 {
+                for x in 0..3 {
+                    grid_sample_data.extend_from_slice(&get_texel(
+                        &grid_texture_data,
+                        origin + ivec2(x, y),
+                        grid_stride,
+                    ));
+                }
             }
         }
+
+        let irradiance_volume = IrradianceVolume {
+            meta,
+            data: grid_sample_data,
+        };
+
+        let mut output_path = output_dir.to_owned();
+        output_path.push(filename);
+        output_path.set_extension("voxelgi.bincode");
+
+        let mut output = File::create(&output_path)
+            .unwrap_or_else(|err| die(format!("Failed to create the output file: {:?}", err)));
+        bincode::serialize_into(&mut output, &irradiance_volume).unwrap_or_else(|err| {
+            die(format!(
+                "Failed to write the irradiance volume to disk: {:?}",
+                err
+            ))
+        });
+
+        let irradiance_volume_handle: Handle<IrradianceVolume> =
+            add_to_manifest(manifest, &output_path, assets_dir, asset_server);
+
+        let transform = get_transform_matrix(&grid_data, "mat");
+
+        world
+            .spawn(irradiance_volume_handle)
+            .insert(SpatialBundle {
+                transform,
+                ..SpatialBundle::default()
+            })
+            .remove::<ComputedVisibility>();
     }
-
-    let irradiance_volume = IrradianceVolume {
-        meta,
-        data: grid_sample_data,
-    };
-
-    let mut output_path = output_dir.to_owned();
-    output_path.push(filename);
-    output_path.set_extension("voxelgi.bincode");
-
-    let mut output = File::create(&output_path)
-        .unwrap_or_else(|err| die(format!("Failed to create the output file: {:?}", err)));
-    bincode::serialize_into(&mut output, &irradiance_volume).unwrap_or_else(|err| {
-        die(format!(
-            "Failed to write the irradiance volume to disk: {:?}",
-            err
-        ))
-    });
-
-    let irradiance_volume_handle: Handle<IrradianceVolume> =
-        add_to_manifest(manifest, &output_path, assets_dir, asset_server);
-
-    world
-        .spawn(irradiance_volume_handle)
-        .insert(SpatialBundle {
-            transform: Transform::from_matrix(Mat4::from_cols_slice(&grid_data.get_f32_vec("mat"))),
-            ..SpatialBundle::default()
-        })
-        .remove::<ComputedVisibility>();
 }
 
 /// `stride` is in bytes.
@@ -349,7 +358,7 @@ fn extract_single_reflection_probe(
     world: &mut World,
     manifest: &mut Manifest,
     asset_server: &mut AssetServer,
-    light_cache_data: &Instance,
+    cube_data: &Instance,
     cubemap_index: usize,
     cube_dimensions: IVec3,
     cube_texture_data: &[u8],
@@ -357,6 +366,8 @@ fn extract_single_reflection_probe(
     assets_dir: &Path,
     filename: &OsStr,
 ) {
+    let transform = get_transform_matrix(cube_data, "attenuationmat");
+
     let cubemap_face_byte_size_rgba_f32 =
         cube_dimensions.x as usize * cube_dimensions.y as usize * 16;
     let cubemap_byte_size_rgba_f32 = cubemap_face_byte_size_rgba_f32 * 6;
@@ -431,9 +442,7 @@ fn extract_single_reflection_probe(
             specular_map,
         })
         .insert(SpatialBundle {
-            transform: Transform::from_translation(
-                Vec3::from_slice(&light_cache_data.get_f32_vec("position")).xzy(),
-            ),
+            transform,
             ..SpatialBundle::default()
         })
         .remove::<ComputedVisibility>();
@@ -750,4 +759,12 @@ where
     let handle = asset_server.load::<T, _>(&*asset_dir_relative_path);
     manifest.insert(handle.id(), asset_dir_relative_path);
     handle
+}
+
+fn get_transform_matrix(data: &Instance, name: &str) -> Transform {
+    let attenuation_matrix = Mat4::from_cols_slice(&data.get_f32_vec(name));
+    let mut transform = Transform::from_matrix(attenuation_matrix.inverse());
+    transform.scale = transform.scale.xzy();
+    transform.translation = transform.translation.xzy();
+    transform
 }

@@ -296,6 +296,7 @@ fn reflection_probe_light(
 #ifndef PREPASS_FRAGMENT
 fn pbr(
     in: PbrInput,
+    lightmap_uv: vec2<f32>,
 ) -> vec4<f32> {
     var output_color: vec4<f32> = in.material.base_color;
 
@@ -380,21 +381,26 @@ fn pbr(
     // Ambient light (indirect)
     var indirect_light = ambient::ambient_light(in.world_position, in.N, in.V, NdotV, diffuse_color, F0, perceptual_roughness, occlusion);
 
-    // Environment map light (indirect)
+#ifdef VERTEX_LIGHTMAP_UVS
+    // FIXME: Make this exposure configurable!!!
+    indirect_light += textureSample(lightmap_texture, lightmap_sampler, lightmap_uv).rgb * 0.00075 * diffuse_color;
+#else
 #ifdef FRAGMENT_REFLECTION_PROBE
     let environment_light = reflection_probe_light(perceptual_roughness, roughness, diffuse_color, NdotV, f_ab, in.N, R, F0);
     indirect_light += (environment_light.diffuse * occlusion) + environment_light.specular;
 #else
 #ifdef FRAGMENT_IRRADIANCE_VOLUME
-    let environment_light = irradiance_volume_light(perceptual_roughness, roughness, diffuse_color, NdotV, f_ab, in.world_position, in.N, R, F0);
+    let environment_light = irradiance_volume_light(perceptual_roughness, roughness, diffuse_color, NdotV, f_ab, in.world_position.xyz, in.N, R, F0);
     indirect_light += (environment_light.diffuse * occlusion) + environment_light.specular;
 #else
 #ifdef ENVIRONMENT_MAP
+    // Environment map light (indirect)
     let environment_light = bevy_pbr::environment_map::environment_map_light(perceptual_roughness, roughness, diffuse_color, NdotV, f_ab, in.N, R, F0);
     indirect_light += (environment_light.diffuse * occlusion) + environment_light.specular;
 #endif  // ENVIRONMENT_MAP
 #endif  // FRAGMENT_IRRADIANCE_VOLUME
 #endif  // FRAGMENT_REFLECTION_PROBE
+#endif  // VERTEX_LIGHTMAP_UVS
 
     let emissive_light = emissive.rgb * output_color.a;
 
@@ -511,11 +517,11 @@ fn fragment(
 #endif
 
 #ifdef VERTEX_LIGHTMAP_UVS
-    // FIXME: This is wrong! Only do baked lighting!!!
     let lightmap_uv = mix(lightmap_uv_rect.xy, lightmap_uv_rect.zw, in.lightmap_uv);
-    // FIXME: Make this exposure configurable!!!
-    output_color *= textureSample(lightmap_texture, lightmap_sampler, lightmap_uv) * 0.00075;
 #else
+    let lightmap_uv = vec2(0.0);
+#endif
+
     // NOTE: Unlit bit not set means == 0 is true, so the true case is if lit
     if ((pbr_bindings::material.flags & pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u) {
         // Prepare a 'processed' StandardMaterial by sampling all textures to resolve
@@ -597,11 +603,10 @@ fn fragment(
 
         pbr_input.flags = mesh.flags;
 
-        output_color = pbr(pbr_input);
+        output_color = pbr(pbr_input, lightmap_uv);
     } else {
         output_color = pbr_functions::alpha_discard(pbr_bindings::material, output_color);
     }
-#endif  // VERTEX_LIGHTMAP_UVS
 
     // fog
     if (fog.mode != FOG_MODE_OFF && (pbr_bindings::material.flags & pbr_types::STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT) != 0u) {
