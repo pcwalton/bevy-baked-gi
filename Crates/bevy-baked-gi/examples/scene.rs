@@ -3,8 +3,9 @@
 use bevy::asset::FileAssetIo;
 use bevy::math::Vec3A;
 use bevy::prelude::{
-    AmbientLight, App, AssetPlugin, AssetServer, Camera3dBundle, Color, Commands, Name,
-    Plugin, PluginGroup, Query, Res, ResMut, Resource, Startup, Transform, Update, Vec3,
+    AmbientLight, App, AssetPlugin, AssetServer, Camera3dBundle, Changed, Color, Commands,
+    DirectionalLight, Name, Plugin, PluginGroup, PointLight, Query, Res, ResMut, Resource, Startup,
+    Transform, Update, Vec3,
 };
 use bevy::scene::{DynamicSceneBundle, SceneBundle};
 use bevy::DefaultPlugins;
@@ -53,7 +54,12 @@ fn main() {
         .add_systems(Startup, bevy_view_controls_egui::simple_setup)
         .add_systems(Update, bevy_view_controls_egui::simple_view_controls)
         .add_systems(Update, rotate_ferris)
+        .add_systems(Update, apply_shadows_to_lights)
         .insert_resource(args)
+        .insert_resource(AmbientLight {
+            brightness: 0.0,
+            ..AmbientLight::default()
+        })
         .run();
 }
 
@@ -143,6 +149,19 @@ fn rotate_ferris(mut query: Query<(&Name, &mut Transform)>) {
         if &**name == "Ferris" {
             transform.rotate_axis(Vec3::Y, FERRIS_ROTATION_SPEED);
         }
+    }
+}
+
+fn apply_shadows_to_lights(
+    mut directional_lights: Query<&mut DirectionalLight, Changed<DirectionalLight>>,
+    mut point_lights: Query<&mut PointLight, Changed<PointLight>>,
+) {
+    for mut directional_light in directional_lights.iter_mut() {
+        directional_light.shadows_enabled = true;
+    }
+
+    for mut point_light in point_lights.iter_mut() {
+        point_light.shadows_enabled = true;
     }
 }
 

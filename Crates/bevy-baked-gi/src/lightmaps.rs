@@ -1,18 +1,12 @@
 // bevy-baked-gi/Crates/bevy-baked-gi/src/lightmaps.rs
 
-use std::mem;
-use std::sync::{Arc, Mutex};
-
 use crate::irradiance_volumes::GiPbrMaterial;
 use crate::GltfGiSettings;
-use arrayvec::ArrayVec;
 use bevy::asset::{AssetLoader, AssetPath, Error as AnyhowError, LoadContext, LoadedAsset};
-use bevy::gltf::{GltfError, GltfExtras, GltfLoader};
-use bevy::math::vec4;
+use bevy::gltf::{GltfError, GltfLoader};
 use bevy::prelude::{
-    error, info, warn, AssetEvent, AssetServer, Assets, Children, Commands, Component, Deref,
-    DerefMut, Entity, EventReader, Handle, Image, Mesh, Query, Res, ResMut, Resource,
-    StandardMaterial, Vec4, Without,
+    error, info, warn, AssetEvent, AssetServer, Assets, Commands, Component, Deref, DerefMut,
+    Entity, EventReader, Handle, Image, Mesh, Query, Res, ResMut, Resource, StandardMaterial, Vec4,
 };
 use bevy::reflect::{Reflect, TypePath, TypeUuid};
 use bevy::render::extract_component::ExtractComponent;
@@ -21,7 +15,7 @@ use bevy::render::render_resource::{AsBindGroup, VertexFormat};
 use bevy::utils::{BoxedFuture, HashSet};
 use gltf::buffer::Source;
 use gltf::{Gltf as GGltf, Mesh as GMesh, Primitive, Semantic};
-use serde_json::Value;
+use std::sync::{Arc, Mutex};
 
 pub static LIGHTMAP_UV_ATTRIBUTE: MeshVertexAttribute =
     MeshVertexAttribute::new("LightmapUv", 0xbe293e1f, VertexFormat::Float32x2);
@@ -113,10 +107,8 @@ pub fn apply_gltf_lightmap_settings(
         let lightmap = asset_server.load(&*lightmap_settings.path);
 
         // TODO: Cache and reuse these!
-        let new_lightmapped_material = gi_pbr_assets.add(GiPbrMaterial {
-            base_color: standard_material.base_color.as_rgba_f32().into(),
-            base_color_texture: standard_material.base_color_texture.clone(),
-        });
+        let new_lightmapped_material =
+            gi_pbr_assets.add(GiPbrMaterial((*standard_material).clone()));
 
         commands
             .entity(entity)
@@ -228,7 +220,10 @@ pub(crate) fn handle_lightmap_uv_asset_events(
         info!("Copied lightmap UVs {:?}", lightmap_uvs_handle);
 
         // It's OK to drop the lightmap UVs now, since they've been added to the mesh.
-        kung_fu_death_grip.lock().unwrap().remove(&lightmap_uvs_handle);
+        kung_fu_death_grip
+            .lock()
+            .unwrap()
+            .remove(&lightmap_uvs_handle);
     }
 }
 

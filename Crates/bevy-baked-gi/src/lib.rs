@@ -469,7 +469,7 @@ pub fn queue_gi_pbr_material_meshes(
                         GiPbrPipelineKey {
                             material: MaterialPipelineKey {
                                 mesh_key,
-                                bind_group_data: material.key,
+                                bind_group_data: material.key.clone(),
                             },
                             lighting: lighting_type,
                         },
@@ -646,13 +646,11 @@ pub fn instantiate_gltf_pbr_materials(
             continue;
         }
 
-        let Some(standard_material) =
+        let Some(pbr_material) =
             standard_material_assets.get(standard_material_handle) else { continue };
 
-        let new_pbr_gi_material = pbr_gi_material_assets.add(GiPbrMaterial {
-            base_color: standard_material.base_color.as_rgba_f32().into(),
-            base_color_texture: standard_material.base_color_texture.clone(),
-        });
+        let new_pbr_gi_material =
+            pbr_gi_material_assets.add(GiPbrMaterial((*pbr_material).clone()));
 
         commands
             .entity(entity)

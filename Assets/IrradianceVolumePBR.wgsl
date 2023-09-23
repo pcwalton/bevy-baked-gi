@@ -5,6 +5,11 @@
 #import bevy_pbr::pbr_types as pbr_types
 #import bevy_pbr::prepass_utils
 #import bevy_pbr::lighting as lighting
+#import bevy_pbr::mesh_view_bindings as view_bindings
+#import bevy_pbr::clustered_forward as clustering
+#import bevy_pbr::mesh_view_types as mesh_view_types
+#import bevy_pbr::shadows as shadows
+#import bevy_pbr::ambient as ambient
 
 #import bevy_pbr::mesh_bindings            mesh
 #import bevy_pbr::mesh_functions           mesh_position_local_to_clip, mesh_position_local_to_world, mesh_normal_local_to_world
@@ -12,6 +17,8 @@
 #import bevy_pbr::mesh_view_types          FOG_MODE_OFF
 #import bevy_core_pipeline::tonemapping    screen_space_dither, powsafe, tone_mapping
 #import bevy_pbr::parallax_mapping         parallaxed_uv
+#import bevy_pbr::pbr_functions            PbrInput, alpha_discard
+#import bevy_pbr::mesh_types               MESH_FLAGS_SHADOW_RECEIVER_BIT
 
 #import bevy_pbr::prepass_utils
 
@@ -73,13 +80,6 @@ struct GridData {
 }
 
 #endif  // FRAGMENT_IRRADIANCE_VOLUME
-
-@group(1) @binding(0)
-var<uniform> base_color: vec4<f32>;
-@group(1) @binding(1)
-var base_color_texture: texture_2d<f32>;
-@group(1) @binding(2)
-var base_color_sampler: sampler;
 
 #ifdef FRAGMENT_IRRADIANCE_VOLUME
 @group(3) @binding(0)
@@ -292,6 +292,131 @@ fn reflection_probe_light(
 
 #endif  // FRAGMENT_REFLECTION_PROBE
 
+// From `pbr_functions.wgsl`, modified to support reflection probes and irradiance volumes.
+#ifndef PREPASS_FRAGMENT
+fn pbr(
+    in: PbrInput,
+) -> vec4<f32> {
+    var output_color: vec4<f32> = in.material.base_color;
+
+    // TODO use .a for exposure compensation in HDR
+    let emissive = in.material.emissive;
+
+    // calculate non-linear roughness from linear perceptualRoughness
+    let metallic = in.material.metallic;
+    let perceptual_roughness = in.material.perceptual_roughness;
+    let roughness = lighting::perceptualRoughnessToRoughness(perceptual_roughness);
+
+    let occlusion = in.occlusion;
+
+    output_color = alpha_discard(in.material, output_color);
+
+    // Neubelt and Pettineo 2013, "Crafting a Next-gen Material Pipeline for The Order: 1886"
+    let NdotV = max(dot(in.N, in.V), 0.0001);
+
+    // Remapping [0,1] reflectance to F0
+    // See https://google.github.io/filament/Filament.html#materialsystem/parameterization/remapping
+    let reflectance = in.material.reflectance;
+    let F0 = 0.16 * reflectance * reflectance * (1.0 - metallic) + output_color.rgb * metallic;
+
+    // Diffuse strength inversely related to metallicity
+    let diffuse_color = output_color.rgb * (1.0 - metallic);
+
+    let R = reflect(-in.V, in.N);
+
+    let f_ab = lighting::F_AB(perceptual_roughness, NdotV);
+
+    var direct_light: vec3<f32> = vec3<f32>(0.0);
+
+    let view_z = dot(vec4<f32>(
+        view.inverse_view[0].z,
+        view.inverse_view[1].z,
+        view.inverse_view[2].z,
+        view.inverse_view[3].z
+    ), in.world_position);
+    let cluster_index = clustering::fragment_cluster_index(in.frag_coord.xy, view_z, in.is_orthographic);
+    let offset_and_counts = clustering::unpack_offset_and_counts(cluster_index);
+
+    // Point lights (direct)
+    for (var i: u32 = offset_and_counts[0]; i < offset_and_counts[0] + offset_and_counts[1]; i = i + 1u) {
+        let light_id = clustering::get_light_id(i);
+        var shadow: f32 = 1.0;
+        if ((mesh.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
+                && (view_bindings::point_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+            shadow = shadows::fetch_point_shadow(light_id, in.world_position, in.world_normal);
+        }
+        let light_contrib = lighting::point_light(in.world_position.xyz, light_id, roughness, NdotV, in.N, in.V, R, F0, f_ab, diffuse_color);
+        direct_light += light_contrib * shadow;
+    }
+
+    // Spot lights (direct)
+    for (var i: u32 = offset_and_counts[0] + offset_and_counts[1]; i < offset_and_counts[0] + offset_and_counts[1] + offset_and_counts[2]; i = i + 1u) {
+        let light_id = clustering::get_light_id(i);
+
+        var shadow: f32 = 1.0;
+        if ((mesh.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
+                && (view_bindings::point_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+            shadow = shadows::fetch_spot_shadow(light_id, in.world_position, in.world_normal);
+        }
+        let light_contrib = lighting::spot_light(in.world_position.xyz, light_id, roughness, NdotV, in.N, in.V, R, F0, f_ab, diffuse_color);
+        direct_light += light_contrib * shadow;
+    }
+
+    // directional lights (direct)
+    let n_directional_lights = view_bindings::lights.n_directional_lights;
+    for (var i: u32 = 0u; i < n_directional_lights; i = i + 1u) {
+        var shadow: f32 = 1.0;
+        if ((mesh.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
+                && (view_bindings::lights.directional_lights[i].flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+            shadow = shadows::fetch_directional_shadow(i, in.world_position, in.world_normal, view_z);
+        }
+        var light_contrib = lighting::directional_light(i, roughness, NdotV, in.N, in.V, R, F0, f_ab, diffuse_color);
+#ifdef DIRECTIONAL_LIGHT_SHADOW_MAP_DEBUG_CASCADES
+        light_contrib = shadows::cascade_debug_visualization(light_contrib, i, view_z);
+#endif
+        direct_light += light_contrib * shadow;
+    }
+
+    // Ambient light (indirect)
+    var indirect_light = ambient::ambient_light(in.world_position, in.N, in.V, NdotV, diffuse_color, F0, perceptual_roughness, occlusion);
+
+    // Environment map light (indirect)
+#ifdef FRAGMENT_REFLECTION_PROBE
+    let environment_light = reflection_probe_light(perceptual_roughness, roughness, diffuse_color, NdotV, f_ab, in.N, R, F0);
+    indirect_light += (environment_light.diffuse * occlusion) + environment_light.specular;
+#else
+#ifdef FRAGMENT_IRRADIANCE_VOLUME
+    let environment_light = irradiance_volume_light(perceptual_roughness, roughness, diffuse_color, NdotV, f_ab, in.world_position, in.N, R, F0);
+    indirect_light += (environment_light.diffuse * occlusion) + environment_light.specular;
+#else
+#ifdef ENVIRONMENT_MAP
+    let environment_light = bevy_pbr::environment_map::environment_map_light(perceptual_roughness, roughness, diffuse_color, NdotV, f_ab, in.N, R, F0);
+    indirect_light += (environment_light.diffuse * occlusion) + environment_light.specular;
+#endif  // ENVIRONMENT_MAP
+#endif  // FRAGMENT_IRRADIANCE_VOLUME
+#endif  // FRAGMENT_REFLECTION_PROBE
+
+    let emissive_light = emissive.rgb * output_color.a;
+
+    // Total light
+    output_color = vec4<f32>(
+        direct_light + indirect_light + emissive_light,
+        output_color.a
+    );
+
+    output_color = clustering::cluster_debug_visualization(
+        output_color,
+        view_z,
+        in.is_orthographic,
+        offset_and_counts,
+        cluster_index,
+    );
+
+    return output_color;
+}
+#endif // PREPASS_FRAGMENT
+
+
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
     var model = mesh.model;
@@ -301,22 +426,26 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     out.world_position = mesh_position_local_to_world(model, vec4<f32>(vertex.position, 1.0));
     out.world_normal = mesh_normal_local_to_world(vertex.normal);
     out.uv = vertex.uv;
+#ifdef VERTEX_COLORS
+    out.color = vec4(1.0);
+#endif
 #ifdef VERTEX_LIGHTMAP_UVS
     out.lightmap_uv = vertex.lightmap_uv;
 #endif
     return out;
 }
 
+/*
 @fragment
 fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
-    var color = base_color;
-    color *= textureSample(base_color_texture, base_color_sampler, mesh.uv);
+    var color = pbr_bindings::material.base_color;
+    color *= textureSample(pbr_bindings::base_color_texture, pbr_bindings::base_color_sampler, mesh.uv);
 #ifdef VERTEX_LIGHTMAP_UVS
     let lightmap_uv = mix(lightmap_uv_rect.xy, lightmap_uv_rect.zw, mesh.lightmap_uv);
     color *= textureSample(lightmap_texture, lightmap_sampler, lightmap_uv) * 0.00075;
 #endif
 
-    let perceptual_roughness = 0.0;
+    var perceptual_roughness: f32 = pbr_bindings::material.perceptual_roughness;
     let roughness = lighting::perceptualRoughnessToRoughness(perceptual_roughness);
     let P = mesh.world_position.xyz;
     let V = pbr_functions::calculate_view(mesh.world_position, false);
@@ -338,11 +467,11 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
 
     return color;
 }
+*/
 
-/*
 @fragment
 fn fragment(
-    in: MeshVertexOutput,
+    in: VertexOutput,
     @builtin(front_facing) is_front: bool,
 ) -> @location(0) vec4<f32> {
     var output_color: vec4<f32> = pbr_bindings::material.base_color;
@@ -381,6 +510,12 @@ fn fragment(
     }
 #endif
 
+#ifdef VERTEX_LIGHTMAP_UVS
+    // FIXME: This is wrong! Only do baked lighting!!!
+    let lightmap_uv = mix(lightmap_uv_rect.xy, lightmap_uv_rect.zw, in.lightmap_uv);
+    // FIXME: Make this exposure configurable!!!
+    output_color *= textureSample(lightmap_texture, lightmap_sampler, lightmap_uv) * 0.00075;
+#else
     // NOTE: Unlit bit not set means == 0 is true, so the true case is if lit
     if ((pbr_bindings::material.flags & pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u) {
         // Prepare a 'processed' StandardMaterial by sampling all textures to resolve
@@ -462,10 +597,11 @@ fn fragment(
 
         pbr_input.flags = mesh.flags;
 
-        output_color = pbr_functions::pbr(pbr_input);
+        output_color = pbr(pbr_input);
     } else {
         output_color = pbr_functions::alpha_discard(pbr_bindings::material, output_color);
     }
+#endif  // VERTEX_LIGHTMAP_UVS
 
     // fog
     if (fog.mode != FOG_MODE_OFF && (pbr_bindings::material.flags & pbr_types::STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT) != 0u) {
@@ -489,4 +625,3 @@ fn fragment(
 #endif
     return output_color;
 }
-*/
