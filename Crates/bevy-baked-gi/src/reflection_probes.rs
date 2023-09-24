@@ -1,9 +1,14 @@
 // bevy-baked-gi/Crates/bevy-baked-gi/src/reflection_probes.rs
 
 use crate::irradiance_volumes::GiPbrMaterial;
-use bevy::prelude::{Commands, Component, Entity, GlobalTransform, Handle, Image, Query, With, ReflectComponent};
+use crate::AabbExt;
+use bevy::math::Vec3A;
+use bevy::prelude::{
+    Commands, Component, Entity, GlobalTransform, Handle, Image, Query, ReflectComponent, With,
+};
 use bevy::reflect::{Reflect, TypeUuid};
 use bevy::render::extract_component::ExtractComponent;
+use bevy::render::primitives::Aabb;
 use bevy::render::render_resource::AsBindGroup;
 
 /// The component that defines a reflection probe.
@@ -31,15 +36,21 @@ pub fn apply_reflection_probes(
     reflection_probes_query: Query<(&ReflectionProbe, &GlobalTransform)>,
     mut targets_query: Query<(Entity, &GlobalTransform), With<Handle<GiPbrMaterial>>>,
 ) {
-    // FIXME: Check distance, fill in appropriately.
-    let Some((reflection_probe, _)) = reflection_probes_query.iter().next() else { return };
+    'outer: for (target, target_transform) in targets_query.iter_mut() {
+        for (reflection_probe, reflection_probe_transform) in &reflection_probes_query {
+            let point = Vec3A::from(
+                reflection_probe_transform.compute_matrix().inverse()
+                    * target_transform.translation().extend(1.0),
+            );
+            if Aabb::centered_unit_cube().contains_point(point) {
+                commands.entity(target).insert(AppliedReflectionProbe {
+                    diffuse_map: Some(reflection_probe.diffuse_map.clone()),
+                    specular_map: Some(reflection_probe.specular_map.clone()),
+                });
+                continue 'outer;
+            }
+        }
 
-    // TODO: It would probably be nice to switch to building an AABB tree or something if there are
-    // a *lot* of reflection probes, to avoid worst-case O(n²) behavior.
-    for (target, _) in targets_query.iter_mut() {
-        commands.entity(target).insert(AppliedReflectionProbe {
-            diffuse_map: Some(reflection_probe.diffuse_map.clone()),
-            specular_map: Some(reflection_probe.specular_map.clone()),
-        });
+        commands.entity(target).remove::<AppliedReflectionProbe>();
     }
 }

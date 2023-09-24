@@ -1,17 +1,20 @@
 // bevy-baked-gi/Crates/bevy-baked-gi/src/irradiance_volumes.rs
 
-use crate::Lightmapped;
+use crate::{AabbExt, Lightmapped};
 use bevy::asset::{AssetLoader, Error as AnyhowError, LoadContext, LoadedAsset};
-use bevy::math::ivec2;
+use bevy::math::{ivec2, Vec3A};
 use bevy::prelude::{
     info, AssetEvent, Assets, Changed, Commands, Component, Entity, EventReader, FromWorld,
     GlobalTransform, Handle, IVec2, IVec3, Image, Mat4, Material, Or, Query, Res, ResMut, Resource,
-    StandardMaterial, Vec3, With, Without, World,
+    StandardMaterial, Transform, Vec3, With, Without, World,
 };
 use bevy::reflect::{Reflect, TypeUuid};
 use bevy::render::extract_component::ExtractComponent;
+use bevy::render::primitives::Aabb;
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_resource::{AsBindGroup, ShaderRef, ShaderType, BindGroupLayout, PreparedBindGroup, AsBindGroupError};
+use bevy::render::render_resource::{
+    AsBindGroup, AsBindGroupError, BindGroupLayout, PreparedBindGroup, ShaderRef, ShaderType,
+};
 use bevy::render::renderer::RenderDevice;
 use bevy::render::texture::FallbackImage;
 use bevy::utils::BoxedFuture;
@@ -218,25 +221,44 @@ pub fn update_irradiance_grid(
     }
 }
 
-/// TODO: Support multiple irradiance volumes.
+/// FIXME: Irradiance volumes should probably be entities.
 pub fn apply_irradiance_volumes(
     mut commands: Commands,
     irradiance_grid: Res<IrradianceGrid>,
-    mut targets_query: Query<Entity, (With<Handle<GiPbrMaterial>>, Without<Lightmapped>)>,
+    mut targets_query: Query<
+        (Entity, &GlobalTransform, Option<&Aabb>),
+        (With<Handle<GiPbrMaterial>>, Without<Lightmapped>),
+    >,
 ) {
-    // FIXME: Check distance, fill in appropriately.
+    'outer: for (target, target_transform, maybe_aabb) in targets_query.iter_mut() {
+        let center = match maybe_aabb {
+            None => target_transform.translation(),
+            Some(aabb) => target_transform.transform_point(aabb.center.into()),
+        };
 
-    for target in targets_query.iter_mut() {
+        #[warn(clippy::never_loop)]
+        for irradiance_volume_descriptor in &irradiance_grid.gpu_data {
+            // FIXME: Cache the matrix inverse operation…
+            let point =
+                Vec3A::from(irradiance_volume_descriptor.transform.inverse() * center.extend(1.0));
+            println!(
+                "aabb center={:?} transform={:?} point={:?}",
+                center, irradiance_volume_descriptor.transform, point
+            );
+            if Aabb::centered_unit_cube().contains_point(point) {
+                commands
+                    .entity(target)
+                    .insert(ComputedIrradianceVolumeInfo {
+                        irradiance_volume_descriptor: irradiance_volume_descriptor.clone(),
+                        irradiance_volume_texture: irradiance_grid.texture.clone(),
+                    });
+                continue 'outer;
+            }
+        }
+
         commands
             .entity(target)
-            .insert(ComputedIrradianceVolumeInfo {
-                irradiance_volume_descriptor: irradiance_grid
-                    .gpu_data
-                    .get(0)
-                    .cloned()
-                    .unwrap_or_default(),
-                irradiance_volume_texture: irradiance_grid.texture.clone(),
-            });
+            .remove::<ComputedIrradianceVolumeInfo>();
     }
 }
 
@@ -266,12 +288,14 @@ impl AsBindGroup for GiPbrMaterial {
         images: &RenderAssets<Image>,
         fallback_image: &FallbackImage,
     ) -> Result<PreparedBindGroup<Self::Data>, AsBindGroupError> {
-        self.0.as_bind_group(layout, render_device, images, fallback_image)
+        self.0
+            .as_bind_group(layout, render_device, images, fallback_image)
     }
 
     fn bind_group_layout(render_device: &RenderDevice) -> BindGroupLayout
     where
-        Self: Sized {
+        Self: Sized,
+    {
         StandardMaterial::bind_group_layout(render_device)
     }
 }

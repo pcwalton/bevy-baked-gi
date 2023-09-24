@@ -22,7 +22,7 @@ use bevy::ecs::query::ROQueryItem;
 use bevy::ecs::system::lifetimeless::Read;
 use bevy::ecs::system::SystemParamItem;
 use bevy::gltf::{GltfExtras, GltfLoader};
-use bevy::math::vec2;
+use bevy::math::{vec2, vec3, BVec3A, Vec3A};
 use bevy::pbr::{
     self, DrawMesh, DrawPrepass, ExtractedMaterials, MaterialPipeline, MaterialPipelineKey,
     MeshPipelineKey, MeshUniform, PrepassPipelinePlugin, PrepassPlugin, RenderLightSystems,
@@ -30,14 +30,16 @@ use bevy::pbr::{
     SetMeshViewBindGroup, Shadow,
 };
 use bevy::prelude::{
-    error, info, warn, AddAsset, AlphaMode, App, AssetEvent, AssetServer, Assets, Children,
+    error, info, warn, AddAsset, AlphaMode, App, AssetEvent, AssetServer, Assets, BVec3, Children,
     Commands, Component, Deref, DerefMut, Entity, EnvironmentMapLight, EventReader, FromWorld,
     Handle, HandleUntyped, Image, IntoSystemConfigs, Mesh, Msaa, Name, Plugin, PostUpdate, Query,
-    Rect, Res, ResMut, Resource, StandardMaterial, Update, Vec2, With, Without, World,
+    Rect, Res, ResMut, Resource, StandardMaterial, Transform, Update, Vec2, Vec3, With, Without,
+    World,
 };
 use bevy::reflect::Reflect;
 use bevy::render::extract_component::ExtractComponentPlugin;
 use bevy::render::mesh::{MeshVertexAttribute, MeshVertexBufferLayout};
+use bevy::render::primitives::Aabb;
 use bevy::render::render_asset::{PrepareAssetSet, RenderAssets};
 use bevy::render::render_phase::{
     AddRenderCommand, DrawFunctions, PhaseItem, RenderCommand, RenderCommandResult, RenderPhase,
@@ -141,6 +143,11 @@ numeric"
 
 #[derive(Serialize, Deserialize, Deref, DerefMut)]
 pub struct Manifest(pub BTreeMap<HandleId, PathBuf>);
+
+trait AabbExt {
+    fn contains_point(&self, point: Vec3A) -> bool;
+    fn centered_unit_cube() -> Self;
+}
 
 impl Plugin for BakedGiPlugin {
     fn build(&self, app: &mut App) {
@@ -780,5 +787,18 @@ impl Manifest {
 impl Default for Manifest {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl AabbExt for Aabb {
+    fn contains_point(&self, point: Vec3A) -> bool {
+        (point.cmpge(self.min()) & (point.cmple(self.max()))).all()
+    }
+
+    fn centered_unit_cube() -> Aabb {
+        Aabb {
+            center: Vec3A::ZERO,
+            half_extents: Vec3A::ONE,
+        }
     }
 }

@@ -298,7 +298,8 @@ fn extract_irradiance_volumes(
         let irradiance_volume_handle: Handle<IrradianceVolume> =
             add_to_manifest(manifest, &output_path, assets_dir, asset_server);
 
-        let transform = get_transform_matrix(&grid_data, "mat");
+        let matrix = Mat4::from_cols_slice(&grid_data.get_f32_vec("mat"));
+        let transform = to_transform_matrix(&matrix);
 
         world
             .spawn(irradiance_volume_handle)
@@ -366,7 +367,13 @@ fn extract_single_reflection_probe(
     assets_dir: &Path,
     filename: &OsStr,
 ) {
-    let transform = get_transform_matrix(cube_data, "attenuationmat");
+    // There seems to always be a reflection probe present with an all-zero matrix. Ignore it.
+    let attenuation_matrix = Mat4::from_cols_slice(&cube_data.get_f32_vec("attenuationmat"));
+    if attenuation_matrix == Mat4::ZERO {
+        return;
+    }
+
+    let transform = to_transform_matrix(&attenuation_matrix);
 
     let cubemap_face_byte_size_rgba_f32 =
         cube_dimensions.x as usize * cube_dimensions.y as usize * 16;
@@ -761,9 +768,8 @@ where
     handle
 }
 
-fn get_transform_matrix(data: &Instance, name: &str) -> Transform {
-    let attenuation_matrix = Mat4::from_cols_slice(&data.get_f32_vec(name));
-    let mut transform = Transform::from_matrix(attenuation_matrix.inverse());
+fn to_transform_matrix(matrix: &Mat4) -> Transform {
+    let mut transform = Transform::from_matrix(matrix.inverse());
     transform.scale = transform.scale.xzy();
     transform.translation = transform.translation.xzy();
     transform

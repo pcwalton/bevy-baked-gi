@@ -2,6 +2,7 @@
 
 use bevy::asset::FileAssetIo;
 use bevy::math::Vec3A;
+use bevy::pbr::ScreenSpaceAmbientOcclusionBundle;
 use bevy::prelude::{
     AmbientLight, App, AssetPlugin, AssetServer, Camera3dBundle, Changed, Color, Commands,
     DirectionalLight, Name, Plugin, PluginGroup, PointLight, Query, Res, ResMut, Resource, Startup,
@@ -80,7 +81,8 @@ fn setup(mut commands: Commands, mut asset_server: ResMut<AssetServer>, args: Re
         .insert(ControllableCamera {
             target: Vec3A::ZERO,
             ..ControllableCamera::default()
-        });
+        })
+        .insert(ScreenSpaceAmbientOcclusionBundle::default());
 
     for scene_path in &args.scene {
         if ["gltf", "glb"]
@@ -109,29 +111,6 @@ fn setup(mut commands: Commands, mut asset_server: ResMut<AssetServer>, args: Re
             ..SceneBundle::default()
         })
         .insert(Name::new("Ferris"));
-
-    /*
-    commands
-        .spawn(SpatialBundle {
-            transform: Transform::from_scale(vec3(0.012931285, 0.008930373, 0.012931285))
-                .with_translation(vec3(0.0, -0.041710883, -0.81668377)),
-            ..SpatialBundle::default()
-        })
-        .insert(Name::new("IrradianceVolume"))
-        .insert(asset_server.load::<IrradianceVolume, _>("Sponza.voxelgi.bincode"));
-    */
-
-    /*
-    let diffuse_reflection_probe_map = asset_server.load::<Image, _>("Sponza.diffuse.001.ktx2");
-    let specular_reflection_probe_map = asset_server.load::<Image, _>("Sponza.specular.001.ktx2");
-    commands
-        .spawn(SpatialBundle::default())
-        .insert(Name::new("ReflectionProbe"))
-        .insert(ReflectionProbe {
-            diffuse_map: diffuse_reflection_probe_map,
-            specular_map: specular_reflection_probe_map,
-        });
-    */
 }
 
 impl Plugin for ExampleAssetIoPlugin {
