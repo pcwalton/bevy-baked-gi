@@ -1,7 +1,6 @@
 // bevy-baked-gi/Crates/bevy-baked-gi/src/lightmaps.rs
 
-use crate::irradiance_volumes::GiPbrMaterial;
-use crate::GltfGiSettings;
+use crate::{GiPbrMaterial, GltfGiSettings};
 use bevy::asset::{AssetLoader, AssetPath, Error as AnyhowError, LoadContext, LoadedAsset};
 use bevy::gltf::{GltfError, GltfLoader};
 use bevy::prelude::{

@@ -23,7 +23,7 @@ use bevy_baked_gi::Manifest;
 use blend::{Blend, Instance};
 use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 use clap::Parser;
-use glam::{ivec2, uvec2, vec3, IVec2, IVec3, Mat4, UVec2, Vec3, Vec3Swizzles, Vec4};
+use glam::{ivec2, uvec2, vec3, IVec2, IVec3, Mat4, UVec2, Vec3, Vec3Swizzles};
 use ibllib_bindings::IBLLib_OutputFormat_R32G32B32A32_SFLOAT;
 use std::env;
 use std::ffi::{CString, OsStr};

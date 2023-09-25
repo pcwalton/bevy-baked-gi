@@ -8,6 +8,7 @@
 #import bevy_pbr::mesh_view_bindings as view_bindings
 #import bevy_pbr::clustered_forward as clustering
 #import bevy_pbr::mesh_view_types as mesh_view_types
+#import bevy_pbr::mesh_functions as mesh_functions
 #import bevy_pbr::shadows as shadows
 #import bevy_pbr::ambient as ambient
 
@@ -32,12 +33,25 @@ struct Vertex {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+#ifdef VERTEX_TANGENTS
+    @location(3) tangent: vec4<f32>,
+#endif
+#ifdef VERTEX_COLORS
+    @location(4) color: vec4<f32>,
+#endif
+#ifdef SKINNED
+    @location(5) joint_indices: vec4<u32>,
+    @location(6) joint_weights: vec4<f32>,
+#endif
 #ifdef VERTEX_LIGHTMAP_UVS
-    @location(5) lightmap_uv: vec2<f32>,
+    @location(7) lightmap_uv: vec2<f32>,
+#endif
+#ifdef MORPH_TARGETS
+    @builtin(vertex_index) index: u32,
 #endif
 };
 
-struct VertexOutput {
+struct MeshGiVertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
     @location(1) world_normal: vec3<f32>,
@@ -423,61 +437,58 @@ fn pbr(
 #endif // PREPASS_FRAGMENT
 
 
+// From `mesh.wgsl`.
 @vertex
-fn vertex(vertex: Vertex) -> VertexOutput {
-    var model = mesh.model;
+fn vertex(vertex_no_morph: Vertex) -> MeshGiVertexOutput {
+    var out: MeshGiVertexOutput;
 
-    var out: VertexOutput;
-    out.position = mesh_position_local_to_clip(mesh.model, vec4<f32>(vertex.position, 1.0));
-    out.world_position = mesh_position_local_to_world(model, vec4<f32>(vertex.position, 1.0));
-    out.world_normal = mesh_normal_local_to_world(vertex.normal);
-    out.uv = vertex.uv;
-#ifdef VERTEX_COLORS
-    out.color = vec4(1.0);
+#ifdef MORPH_TARGETS
+    var vertex = morph_vertex(vertex_no_morph);
+#else
+    var vertex = vertex_no_morph;
 #endif
+
+#ifdef SKINNED
+    var model = bevy_pbr::skinning::skin_model(vertex.joint_indices, vertex.joint_weights);
+#else
+    var model = mesh.model;
+#endif
+
+#ifdef VERTEX_NORMALS
+#ifdef SKINNED
+    out.world_normal = bevy_pbr::skinning::skin_normals(model, vertex.normal);
+#else
+    out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal);
+#endif
+#endif
+
+#ifdef VERTEX_POSITIONS
+    out.world_position = mesh_functions::mesh_position_local_to_world(model, vec4<f32>(vertex.position, 1.0));
+    out.position = mesh_functions::mesh_position_world_to_clip(out.world_position);
+#endif
+
+#ifdef VERTEX_UVS
+    out.uv = vertex.uv;
+#endif
+
+#ifdef VERTEX_TANGENTS
+    out.world_tangent = mesh_functions::mesh_tangent_local_to_world(model, vertex.tangent);
+#endif
+
+#ifdef VERTEX_COLORS
+    out.color = vertex.color;
+#endif
+
 #ifdef VERTEX_LIGHTMAP_UVS
     out.lightmap_uv = vertex.lightmap_uv;
 #endif
+
     return out;
 }
 
-/*
-@fragment
-fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
-    var color = pbr_bindings::material.base_color;
-    color *= textureSample(pbr_bindings::base_color_texture, pbr_bindings::base_color_sampler, mesh.uv);
-#ifdef VERTEX_LIGHTMAP_UVS
-    let lightmap_uv = mix(lightmap_uv_rect.xy, lightmap_uv_rect.zw, mesh.lightmap_uv);
-    color *= textureSample(lightmap_texture, lightmap_sampler, lightmap_uv) * 0.00075;
-#endif
-
-    var perceptual_roughness: f32 = pbr_bindings::material.perceptual_roughness;
-    let roughness = lighting::perceptualRoughnessToRoughness(perceptual_roughness);
-    let P = mesh.world_position.xyz;
-    let V = pbr_functions::calculate_view(mesh.world_position, false);
-    let N = mesh.world_normal.xyz;
-    let NdotV = max(dot(N, V), 0.0001);
-    let R = reflect(-V, N);
-    let f_ab = lighting::F_AB(perceptual_roughness, NdotV);
-    let F0 = vec3<f32>(1.0);
-
-#ifdef FRAGMENT_IRRADIANCE_VOLUME
-    let environment_light = irradiance_volume_light(perceptual_roughness, roughness, vec3<f32>(1.0), NdotV, f_ab, P, N, R, F0);
-    color = vec4(environment_light.diffuse + environment_light.specular, 1.0);
-#endif
-
-#ifdef FRAGMENT_REFLECTION_PROBE
-    let environment_light = reflection_probe_light(perceptual_roughness, roughness, vec3<f32>(1.0), NdotV, f_ab, N, R, F0);
-    color = vec4(environment_light.diffuse + environment_light.specular, 1.0);
-#endif
-
-    return color;
-}
-*/
-
 @fragment
 fn fragment(
-    in: VertexOutput,
+    in: MeshGiVertexOutput,
     @builtin(front_facing) is_front: bool,
 ) -> @location(0) vec4<f32> {
     var output_color: vec4<f32> = pbr_bindings::material.base_color;

@@ -1,7 +1,6 @@
 // bevy-baked-gi/Crates/bevy-baked-gi/src/reflection_probes.rs
 
-use crate::irradiance_volumes::GiPbrMaterial;
-use crate::AabbExt;
+use crate::{AabbExt, GiPbrMaterial};
 use bevy::math::Vec3A;
 use bevy::prelude::{
     Commands, Component, Entity, GlobalTransform, Handle, Image, Query, ReflectComponent, With,

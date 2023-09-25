@@ -1,12 +1,15 @@
 // bevy-irradiance-volumes/Crates/bevy-irradiance-volumes/examples/scene.rs
 
 use bevy::asset::FileAssetIo;
+use bevy::core_pipeline::bloom::BloomSettings;
+use bevy::core_pipeline::experimental::taa::TemporalAntiAliasBundle;
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::math::Vec3A;
 use bevy::pbr::ScreenSpaceAmbientOcclusionBundle;
 use bevy::prelude::{
-    AmbientLight, App, AssetPlugin, AssetServer, Camera3dBundle, Changed, Color, Commands,
-    DirectionalLight, Name, Plugin, PluginGroup, PointLight, Query, Res, ResMut, Resource, Startup,
-    Transform, Update, Vec3,
+    AmbientLight, App, AssetPlugin, AssetServer, Camera, Camera3dBundle, Changed, Color, Commands,
+    DirectionalLight, Msaa, Name, Plugin, PluginGroup, PointLight, Query, Res, ResMut, Resource,
+    Startup, Transform, Update, Vec3,
 };
 use bevy::scene::{DynamicSceneBundle, SceneBundle};
 use bevy::DefaultPlugins;
@@ -14,10 +17,11 @@ use bevy_baked_gi::{BakedGiPlugin, Manifest};
 use bevy_egui::EguiPlugin;
 use bevy_view_controls_egui::{ControllableCamera, ViewControlsPlugin};
 use clap::Parser;
+use std::env;
 use std::ffi::OsStr;
 use std::fs::File;
+use std::mem;
 use std::path::PathBuf;
-use std::{env, mem};
 
 const FERRIS_ROTATION_SPEED: f32 = 0.01;
 
@@ -61,6 +65,7 @@ fn main() {
             brightness: 0.0,
             ..AmbientLight::default()
         })
+        .insert_resource(Msaa::Off)
         .run();
 }
 
@@ -76,13 +81,20 @@ fn setup(mut commands: Commands, mut asset_server: ResMut<AssetServer>, args: Re
     commands
         .spawn(Camera3dBundle {
             transform: Transform::from_xyz(0.0, 0.0, 3.0).looking_at(Vec3::ZERO, Vec3::Y),
+            camera: Camera {
+                hdr: true,
+                ..Camera::default()
+            },
+            tonemapping: Tonemapping::TonyMcMapface,
             ..Camera3dBundle::default()
         })
         .insert(ControllableCamera {
             target: Vec3A::ZERO,
             ..ControllableCamera::default()
         })
-        .insert(ScreenSpaceAmbientOcclusionBundle::default());
+        .insert(ScreenSpaceAmbientOcclusionBundle::default())
+        .insert(TemporalAntiAliasBundle::default())
+        .insert(BloomSettings::default());
 
     for scene_path in &args.scene {
         if ["gltf", "glb"]

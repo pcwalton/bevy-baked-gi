@@ -4,8 +4,8 @@
 #![allow(clippy::type_complexity)]
 
 use crate::irradiance_volumes::{
-    ComputedIrradianceVolumeInfo, GiPbrMaterial, IrradianceGrid, IrradianceVolume,
-    IrradianceVolumeAssetLoader, IrradianceVolumeMetadata,
+    ComputedIrradianceVolumeInfo, IrradianceGrid, IrradianceVolume, IrradianceVolumeAssetLoader,
+    IrradianceVolumeMetadata,
 };
 use crate::lightmaps::{
     Lightmap, LightmapUvKungFuDeathGrip, LightmapUvs, Lightmapped, LightmappedGltfAssetLoader,
@@ -22,21 +22,21 @@ use bevy::ecs::query::ROQueryItem;
 use bevy::ecs::system::lifetimeless::Read;
 use bevy::ecs::system::SystemParamItem;
 use bevy::gltf::{GltfExtras, GltfLoader};
-use bevy::math::{vec2, vec3, BVec3A, Vec3A};
+use bevy::math::{vec2, Vec3A};
 use bevy::pbr::{
     self, DrawMesh, DrawPrepass, ExtractedMaterials, MaterialPipeline, MaterialPipelineKey,
     MeshPipelineKey, MeshUniform, PrepassPipelinePlugin, PrepassPlugin, RenderLightSystems,
     RenderMaterials, ScreenSpaceAmbientOcclusionSettings, SetMaterialBindGroup, SetMeshBindGroup,
-    SetMeshViewBindGroup, Shadow,
+    SetMeshViewBindGroup, Shadow, PBR_PREPASS_SHADER_HANDLE,
 };
 use bevy::prelude::{
-    error, info, warn, AddAsset, AlphaMode, App, AssetEvent, AssetServer, Assets, BVec3, Children,
+    error, info, warn, AddAsset, AlphaMode, App, AssetEvent, AssetServer, Assets, Children,
     Commands, Component, Deref, DerefMut, Entity, EnvironmentMapLight, EventReader, FromWorld,
-    Handle, HandleUntyped, Image, IntoSystemConfigs, Mesh, Msaa, Name, Plugin, PostUpdate, Query,
-    Rect, Res, ResMut, Resource, StandardMaterial, Transform, Update, Vec2, Vec3, With, Without,
+    Handle, HandleUntyped, Image, IntoSystemConfigs, Material, Mesh, Msaa, Name, Plugin,
+    PostUpdate, Query, Rect, Res, ResMut, Resource, StandardMaterial, Update, Vec2, With, Without,
     World,
 };
-use bevy::reflect::Reflect;
+use bevy::reflect::{Reflect, TypeUuid};
 use bevy::render::extract_component::ExtractComponentPlugin;
 use bevy::render::mesh::{MeshVertexAttribute, MeshVertexBufferLayout};
 use bevy::render::primitives::Aabb;
@@ -46,8 +46,9 @@ use bevy::render::render_phase::{
     SetItemPipeline, TrackedRenderPass,
 };
 use bevy::render::render_resource::{
-    AsBindGroup, BindGroupLayout, PipelineCache, PreparedBindGroup, RenderPipelineDescriptor,
-    SpecializedMeshPipeline, SpecializedMeshPipelineError, SpecializedMeshPipelines,
+    AsBindGroup, AsBindGroupError, BindGroupLayout, PipelineCache, PreparedBindGroup,
+    RenderPipelineDescriptor, ShaderRef, SpecializedMeshPipeline, SpecializedMeshPipelineError,
+    SpecializedMeshPipelines,
 };
 use bevy::render::renderer::RenderDevice;
 use bevy::render::texture::{CompressedImageFormats, FallbackImage};
@@ -80,6 +81,10 @@ pub struct GiPbrPipeline {
     lightmap_bind_group_layout: BindGroupLayout,
     reflection_probe_bind_group_layout: BindGroupLayout,
 }
+
+#[derive(Clone, Default, Reflect, TypeUuid, Debug)]
+#[uuid = "d18d9aa6-5053-4cb4-8b59-a1b2d1e6b6db"]
+pub struct GiPbrMaterial(pub StandardMaterial);
 
 #[derive(Component)]
 pub struct RenderGiPbrData {
@@ -547,6 +552,7 @@ impl FromWorld for GiPbrPipeline {
 impl SpecializedMeshPipeline for GiPbrPipeline {
     type Key = GiPbrPipelineKey;
 
+    // Copied from `bevy_pbr::render::mesh`.
     fn specialize(
         &self,
         key: Self::Key,
@@ -575,7 +581,7 @@ impl SpecializedMeshPipeline for GiPbrPipeline {
         let maybe_define = match key.lighting {
             GiType::NoGi => None,
             GiType::Lightmapped => {
-                vertex_attributes.push(LIGHTMAP_UV_ATTRIBUTE.at_shader_location(5));
+                vertex_attributes.push(LIGHTMAP_UV_ATTRIBUTE.at_shader_location(7));
                 Some("VERTEX_LIGHTMAP_UVS")
             }
             GiType::ReflectionProbe => Some("FRAGMENT_REFLECTION_PROBE"),
@@ -800,5 +806,43 @@ impl AabbExt for Aabb {
             center: Vec3A::ZERO,
             half_extents: Vec3A::ONE,
         }
+    }
+}
+
+impl AsBindGroup for GiPbrMaterial {
+    type Data = <StandardMaterial as AsBindGroup>::Data;
+
+    fn as_bind_group(
+        &self,
+        layout: &BindGroupLayout,
+        render_device: &RenderDevice,
+        images: &RenderAssets<Image>,
+        fallback_image: &FallbackImage,
+    ) -> Result<PreparedBindGroup<Self::Data>, AsBindGroupError> {
+        self.0
+            .as_bind_group(layout, render_device, images, fallback_image)
+    }
+
+    fn bind_group_layout(render_device: &RenderDevice) -> BindGroupLayout
+    where
+        Self: Sized,
+    {
+        StandardMaterial::bind_group_layout(render_device)
+    }
+}
+
+impl Material for GiPbrMaterial {
+    fn vertex_shader() -> ShaderRef {
+        // TODO: Use `include_bytes!` instead.
+        "IrradianceVolumePBR.wgsl".into()
+    }
+
+    fn fragment_shader() -> ShaderRef {
+        // TODO: Use `include_bytes!` instead.
+        "IrradianceVolumePBR.wgsl".into()
+    }
+
+    fn prepass_fragment_shader() -> ShaderRef {
+        PBR_PREPASS_SHADER_HANDLE.typed().into()
     }
 }
