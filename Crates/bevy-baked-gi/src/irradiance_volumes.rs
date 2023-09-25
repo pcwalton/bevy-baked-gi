@@ -7,8 +7,8 @@ use bevy::asset::{AssetLoader, Error as AnyhowError, LoadContext, LoadedAsset};
 use bevy::math::{ivec2, Vec3A};
 use bevy::prelude::{
     info, AssetEvent, Assets, Changed, Commands, Component, Entity, EventReader, FromWorld,
-    GlobalTransform, Handle, IVec2, IVec3, Image, Mat4, Or, Query, Res, ResMut, Resource, Vec3,
-    With, Without, World,
+    GlobalTransform, Handle, IVec2, IVec3, Image, Mat4, Or, Query, Res, ResMut, Resource, With,
+    Without, World,
 };
 use bevy::reflect::{Reflect, TypeUuid};
 use bevy::render::extract_component::ExtractComponent;

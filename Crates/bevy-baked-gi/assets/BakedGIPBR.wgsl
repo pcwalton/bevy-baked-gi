@@ -1,4 +1,4 @@
-// bevy-baked-gi/Assets/IrradianceVolumePBR.wgsl
+// bevy-baked-gi/Crates/bevy-baked-gi/assets/IrradianceVolumePBR.wgsl
 
 #import bevy_pbr::pbr_functions as pbr_functions
 #import bevy_pbr::pbr_bindings as pbr_bindings
@@ -212,8 +212,6 @@ fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) -> S
 
     let localpos_floored = floor(localpos);
     let trilinear_weight = fract(localpos);
-
-    //return localpos_floored / vec3<f32>(grid_data.metadata.resolution);
 
     var weight_accum = 0.0;
     var irradiance_accum = vec3(0.0);

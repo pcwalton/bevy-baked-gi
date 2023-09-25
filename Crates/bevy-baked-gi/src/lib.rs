@@ -13,7 +13,7 @@ use crate::lightmaps::{
 };
 use crate::reflection_probes::AppliedReflectionProbe;
 use arrayvec::ArrayVec;
-use bevy::asset::HandleId;
+use bevy::asset::{load_internal_asset, HandleId};
 use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d, Transparent3d};
 use bevy::core_pipeline::experimental::taa::TemporalAntiAliasSettings;
 use bevy::core_pipeline::prepass::NormalPrepass;
@@ -33,8 +33,8 @@ use bevy::prelude::{
     error, info, warn, AddAsset, AlphaMode, App, AssetEvent, AssetServer, Assets, Children,
     Commands, Component, Deref, DerefMut, Entity, EnvironmentMapLight, EventReader, FromWorld,
     Handle, HandleUntyped, Image, IntoSystemConfigs, Material, Mesh, Msaa, Name, Plugin,
-    PostUpdate, Query, Rect, Res, ResMut, Resource, StandardMaterial, Update, Vec2, With, Without,
-    World,
+    PostUpdate, Query, Rect, Res, ResMut, Resource, Shader, StandardMaterial, Update, Vec2, With,
+    Without, World,
 };
 use bevy::reflect::{Reflect, TypeUuid};
 use bevy::render::extract_component::ExtractComponentPlugin;
@@ -143,6 +143,8 @@ pub struct GiPbrPipelineKey {
 pub struct GltfGiSettings {
     /// No baked global illumination will be applied to this object (other than
     /// an environment map, if applicable).
+    ///
+    /// This corresponds to the DisableGi setting.
     pub disable_gi: bool,
 
     /// If a lightmap is attached to this object, then this contains the
@@ -150,12 +152,25 @@ pub struct GltfGiSettings {
     pub lightmap: Option<GltfLightmapSettings>,
 }
 
+/// Lightmap settings embedded in glTF extras.
 #[derive(Clone, Component, Reflect, Default, Debug)]
 pub struct GltfLightmapSettings {
+    /// The path to the lightmap texture. This is relative to the glTF file.
+    ///
+    /// This corresponds to the Lightmap setting.
+    ///
+    /// FIXME: Make sure it actually is relative to that!
     pub path: PathBuf,
+    /// The UV rectangle within the lightmap texture that contains the baked
+    /// lumels for this object.
+    ///
+    /// This corresponds to the LightmapMinU, LightmapMinV, LightmapMaxU, and
+    /// LightmapMaxV settings.
     pub uv_rect: Rect,
 }
 
+/// The errors that can occur when parsing global-illumination-related fields in
+/// glTF extras.
 #[derive(Thiserror, Debug)]
 pub enum GltfGiSettingsParseError {
     #[error("The glTF extras weren't valid JSON")]
@@ -196,14 +211,24 @@ trait AabbExt {
     fn contains_point(&self, point: Vec3A) -> bool;
 
     /// Returns an AABB with corners at (-1, -1, -1) and (1, 1, 1).
-    /// 
+    ///
     /// That is, the resulting AABB has a center at the origin, and every side
     /// has length of 2 units.
     fn centered_unit_cube() -> Self;
 }
 
+pub const SHADER_HANDLE: HandleUntyped =
+    HandleUntyped::weak_from_u64(Shader::TYPE_UUID, 0xa68b654e530a1882);
+
 impl Plugin for BakedGiPlugin {
     fn build(&self, app: &mut App) {
+        load_internal_asset!(
+            app,
+            SHADER_HANDLE,
+            "../assets/BakedGIPBR.wgsl",
+            Shader::from_wgsl
+        );
+
         // TODO: glTF instantiation should be optional.
         app.register_type::<IrradianceVolume>()
             .register_type::<GiPbrMaterial>()
@@ -895,13 +920,11 @@ impl AsBindGroup for GiPbrMaterial {
 
 impl Material for GiPbrMaterial {
     fn vertex_shader() -> ShaderRef {
-        // TODO: Use `include_bytes!` instead.
-        "IrradianceVolumePBR.wgsl".into()
+        SHADER_HANDLE.typed().into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        // TODO: Use `include_bytes!` instead.
-        "IrradianceVolumePBR.wgsl".into()
+        SHADER_HANDLE.typed().into()
     }
 
     fn prepass_fragment_shader() -> ShaderRef {
