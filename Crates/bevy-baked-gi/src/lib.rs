@@ -71,9 +71,14 @@ pub mod reflection_probes;
 /// Add this plugin to your App in order to enable baked global illumination.
 #[derive(Default)]
 pub struct BakedGiPlugin {
+    /// Extra application-specific vertex attributes that will be parsed in glTF meshes.
     pub custom_vertex_attributes: HashMap<String, MeshVertexAttribute>,
 }
 
+/// The GPU mesh pipeline for physically-based rendering with baked global
+/// illumination.
+///
+/// This is part of the Bevy render app.
 #[derive(Resource)]
 pub struct GiPbrPipeline {
     material_pipeline: MaterialPipeline<GiPbrMaterial>,
@@ -82,6 +87,14 @@ pub struct GiPbrPipeline {
     reflection_probe_bind_group_layout: BindGroupLayout,
 }
 
+/// Like [StandardMaterial], but takes baked global illumination into account.
+///
+/// You must apply this material to a mesh in order for lightmaps, irradiance
+/// volumes, and/or reflection probes to have an effect on its rendering.
+///
+/// By default, the [upgrade_pbr_materials] system replaces all
+/// [StandardMaterial]s with this material. This allows you to use glTF scenes
+/// as usual without having to manually replace the materials within them.
 #[derive(Clone, Default, Reflect, TypeUuid, Debug)]
 #[uuid = "d18d9aa6-5053-4cb4-8b59-a1b2d1e6b6db"]
 pub struct GiPbrMaterial(pub StandardMaterial);
@@ -91,16 +104,25 @@ pub struct RenderGiPbrData {
     pub lighting: PreparedBindGroup<()>,
 }
 
+/// A [RenderCommand] that sets the bind group necessary to render with a reflection probe or
+/// irradiance volume.
 pub struct SetGiPbrBindGroup<const I: usize>;
 
+/// The type of global illumination that is to be applied to a mesh.
 #[derive(Clone, Copy, Debug, Reflect, PartialEq, Eq, Hash)]
 pub enum GiType {
+    /// No global illumination is to be applied, other than possibly an environment map.
     NoGi,
+    /// The mesh has a lightmap that captures the indirect and baked lights.
     Lightmapped,
+    /// The mesh has a baked reflection probe that captures the surrounding scene.
     ReflectionProbe,
+    /// The mesh is located within an irradiance volume that captures the surrounding light.
     IrradianceVolume,
 }
 
+/// All render commands necessary to draw a mesh with a physically-based
+/// material and baked global illumination.
 pub type DrawGiPbrMaterial = (
     SetItemPipeline,
     SetMeshViewBindGroup<0>,
@@ -119,7 +141,12 @@ pub struct GiPbrPipelineKey {
 /// Settings that can be present in glTF files as glTF extras.
 #[derive(Clone, Component, Reflect, Default, Debug)]
 pub struct GltfGiSettings {
+    /// No baked global illumination will be applied to this object (other than
+    /// an environment map, if applicable).
     pub disable_gi: bool,
+
+    /// If a lightmap is attached to this object, then this contains the
+    /// settings of that lightmap.
     pub lightmap: Option<GltfLightmapSettings>,
 }
 
@@ -146,11 +173,32 @@ numeric"
     MalformedLightmapCoords,
 }
 
+/// Maps handle IDs to paths of assets within the assets directory.
+///
+/// `export-blender-gi` exports a serialized instance of this type alongside the
+/// scene in RON format.  Bevy `.scn.ron` files refer to assets by their
+/// [HandleId]s, not by their pathnames. Consequently, in order to load the
+/// scene containing the baked global illumination data at runtime, this table
+/// mapping handle IDs to paths within the assets folder is necessary. The
+/// manifest is written to a file in RON format with the extension
+/// `.manifest.ron`.
+///
+/// Typically, an application loading a scene exported from Blender via
+/// `export-blender-gi` will load the manifest from the `.manifest.ron` file and
+/// direct the [AssetServer] to load every asset in this table with the
+/// [Manifest::load_all] method.
 #[derive(Serialize, Deserialize, Deref, DerefMut)]
 pub struct Manifest(pub BTreeMap<HandleId, PathBuf>);
 
+/// Extension methods for axis-aligned bounding boxes.
 trait AabbExt {
+    /// Returns true if this AABB contains the given point.
     fn contains_point(&self, point: Vec3A) -> bool;
+
+    /// Returns an AABB with corners at (-1, -1, -1) and (1, 1, 1).
+    /// 
+    /// That is, the resulting AABB has a center at the origin, and every side
+    /// has length of 2 units.
     fn centered_unit_cube() -> Self;
 }
 
@@ -199,7 +247,7 @@ impl Plugin for BakedGiPlugin {
             .add_systems(Update, lightmaps::handle_lightmap_uv_asset_events)
             .add_systems(
                 Update,
-                instantiate_gltf_pbr_materials.after(lightmaps::apply_gltf_lightmap_settings),
+                upgrade_pbr_materials.after(lightmaps::apply_gltf_lightmap_settings),
             );
 
         let Ok(render_app) = app.get_sub_app_mut(RenderApp) else { return };
@@ -253,6 +301,8 @@ impl Plugin for BakedGiPlugin {
     }
 }
 
+/// A system, part of the render app, that creates the bind group corresponding to the baked global
+/// illumination in use and builds the [RenderGiPbrData].
 pub fn prepare_gi_pbr_meshes(
     mut commands: Commands,
     query: Query<
@@ -320,7 +370,11 @@ pub fn prepare_gi_pbr_meshes(
     }
 }
 
-/// Copied from `bevy_pbr::material::queue_material_meshes`.
+/// A system, part of the render app, that adds meshes with PBR materials and baked GI to the
+/// appropriate queue, specializing any pipelines if necessary.
+///
+/// This is copied from `bevy_pbr::material::queue_material_meshes` and modified
+/// to support baked global illumination.
 ///
 /// When this goes upstream, this can either be refactored to avoid duplication or else just merged
 /// into `queue_material_meshes`.
@@ -643,7 +697,7 @@ where
 
 /// A system that upgrades non-lightmapped StandardMaterials to [GiPbrMaterial]s if they aren't
 /// lightmapped.
-pub fn instantiate_gltf_pbr_materials(
+pub fn upgrade_pbr_materials(
     mut commands: Commands,
     standard_material_query: Query<(
         Entity,
@@ -677,6 +731,11 @@ pub fn instantiate_gltf_pbr_materials(
     }
 }
 
+/// A system that parses and applies the settings relating to baked global
+/// illumination specified via glTF extras.
+///
+/// See `docs/Lightmaps.md` for more information on the glTF extras available
+/// and how to specify them.
 pub fn parse_gltf_gi_settings(
     mut commands: Commands,
     mut scene_asset_events: EventReader<AssetEvent<Scene>>,
@@ -775,10 +834,13 @@ impl GltfGiSettings {
 }
 
 impl Manifest {
+    /// Creates a new empty manifest.
     pub fn new() -> Manifest {
         Manifest(BTreeMap::new())
     }
 
+    /// Queues all the assets in the manifest for loading and returns a map from
+    /// the handle IDs to the actual loaded handles.
     pub fn load_all(&self, asset_server: &mut AssetServer) -> HashMap<HandleId, HandleUntyped> {
         self.iter()
             .map(|(handle_id, path)| {

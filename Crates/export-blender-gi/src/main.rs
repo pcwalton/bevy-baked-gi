@@ -244,11 +244,13 @@ fn extract_irradiance_volumes(
         }
 
         let meta = IrradianceVolumeMetadata {
+            transform: Mat4::from_cols(
+                Vec3::from_slice(&grid_data.get_f32_vec("increment_x")).extend(0.0),
+                Vec3::from_slice(&grid_data.get_f32_vec("increment_y")).extend(0.0),
+                Vec3::from_slice(&grid_data.get_f32_vec("increment_z")).extend(0.0),
+                Vec3::from_slice(&grid_data.get_f32_vec("corner")).extend(1.0),
+            ),
             resolution,
-            corner: Vec3::from_slice(&grid_data.get_f32_vec("corner")),
-            increment_x: Vec3::from_slice(&grid_data.get_f32_vec("increment_x")),
-            increment_y: Vec3::from_slice(&grid_data.get_f32_vec("increment_y")),
-            increment_z: Vec3::from_slice(&grid_data.get_f32_vec("increment_z")),
             level_bias: grid_data.get_f32("level_bias"),
         };
 

@@ -1,5 +1,7 @@
 // bevy-baked-gi/Crates/bevy-baked-gi/src/lightmaps.rs
 
+//! Textures storing baked light.
+
 use crate::{GiPbrMaterial, GltfGiSettings};
 use bevy::asset::{AssetLoader, AssetPath, Error as AnyhowError, LoadContext, LoadedAsset};
 use bevy::gltf::{GltfError, GltfLoader};
@@ -19,11 +21,12 @@ use std::sync::{Arc, Mutex};
 pub static LIGHTMAP_UV_ATTRIBUTE: MeshVertexAttribute =
     MeshVertexAttribute::new("LightmapUv", 0xbe293e1f, VertexFormat::Float32x2);
 
-/// Stores information about the currently-active lightmap on this entity.
+/// Stores information about the currently-active lightmap on this entity's mesh.
 ///
 /// This component does nothing unless the Lightmapped component is present on the same entity.
 #[derive(Clone, Component, ExtractComponent, AsBindGroup, Reflect, Debug)]
 pub struct Lightmap {
+    /// The lightmap applied to this mesh.
     #[texture(0)]
     #[sampler(1)]
     pub image: Handle<Image>,
@@ -40,15 +43,32 @@ pub struct Lightmap {
     pub uv_rect: Vec4,
 }
 
+/// Temporarily stores the lightmap UVs for a mesh.
+///
+/// This is essentially a workaround for the fact that Bevy currently ignores
+/// the UV1 channel in glTF. When `bevy-baked-gi` loads a glTF file with a
+/// `.gi.glb` extension, the lightmap UVs are parsed and transiently stored
+/// inside this asset before being merged into the Mesh asset itself.
 #[derive(TypeUuid, Reflect)]
 #[uuid = "df95f00d-3deb-40b3-a3fd-7c4bfc788228"]
 pub struct LightmapUvs {
+    /// A handle to the mesh that the UVs are to be attached to.
     pub mesh_handle: Handle<Mesh>,
+    /// The UVs themselves.
     pub uvs: Vec<[f32; 2]>,
 }
 
+/// An asset loader for lightmapped glTF scenes ending in `.gi.gltf` or
+/// `.gi.glb`.
+/// 
+/// Asset files containing a `.gi.gltf`/`.gi.glb` extension are processed for
+/// lightmaps, in addition to being loaded with the standard Bevy glTF loader.
 pub struct LightmappedGltfAssetLoader {
+    /// The underlying Bevy glTF loader.
     pub gltf_loader: GltfLoader,
+
+    /// Stores strong references to the lightmap UVs, to prevent them from
+    /// getting deleted before they're added to the mesh.
     pub(crate) kung_fu_death_grip: LightmapUvKungFuDeathGrip,
 }
 
@@ -191,6 +211,7 @@ impl AssetLoader for LightmappedGltfAssetLoader {
     }
 }
 
+/// A system that receives lightmap UVs and attaches them to meshes.
 pub(crate) fn handle_lightmap_uv_asset_events(
     mut lightmap_uv_events: EventReader<AssetEvent<LightmapUvs>>,
     lightmap_uvs_assets: Res<Assets<LightmapUvs>>,

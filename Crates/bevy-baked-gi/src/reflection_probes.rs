@@ -1,5 +1,7 @@
 // bevy-baked-gi/Crates/bevy-baked-gi/src/reflection_probes.rs
 
+//! Baked cubemap reflections.
+
 use crate::{AabbExt, GiPbrMaterial};
 use bevy::math::Vec3A;
 use bevy::prelude::{
@@ -10,7 +12,14 @@ use bevy::render::extract_component::ExtractComponent;
 use bevy::render::primitives::Aabb;
 use bevy::render::render_resource::AsBindGroup;
 
-/// The component that defines a reflection probe.
+/// The component that defines a baked reflection probe.
+/// 
+/// Any mesh with a GI PBR material located within the boundaries of a
+/// reflection probe uses the diffuse and specular cubemaps stored here for
+/// diffuse and specular reflections, respectively. These reflections reflect
+/// static geometry only, so they won't reflect objects that move. The benefit
+/// is that, because these reflections are precomputed, they're cheap at
+/// runtime.
 #[derive(Component, Clone, Default, Reflect, Debug, TypeUuid)]
 #[uuid = "0fb4528e-7992-41cf-a4d9-445e1fcf055e"]
 #[reflect(Component)]
@@ -19,17 +28,23 @@ pub struct ReflectionProbe {
     pub specular_map: Handle<Image>,
 }
 
-/// Which reflection probe is to be applied to this entity this frame.
+/// Which reflection probe is to be applied to an entity this frame.
+/// 
+/// You don't need to manage these manually; the [apply_reflection_probe] system
+/// automatically handles these.
 #[derive(Component, Clone, Default, AsBindGroup, Reflect, Debug, ExtractComponent)]
 #[reflect(Component)]
 pub struct AppliedReflectionProbe {
+    /// The diffuse map of the surrounding reflection probe, if applicable.
     #[texture(0, dimension = "cube")]
     #[sampler(2)]
     pub diffuse_map: Option<Handle<Image>>,
+    /// The specular map of the surrounding reflection probe, if applicable.
     #[texture(1, dimension = "cube")]
     pub specular_map: Option<Handle<Image>>,
 }
 
+/// A system that determines which reflection probe to apply to each mesh.
 pub fn apply_reflection_probes(
     mut commands: Commands,
     reflection_probes_query: Query<(&ReflectionProbe, &GlobalTransform)>,

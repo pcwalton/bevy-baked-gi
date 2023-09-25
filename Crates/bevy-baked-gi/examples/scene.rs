@@ -1,4 +1,6 @@
-// bevy-irradiance-volumes/Crates/bevy-irradiance-volumes/examples/scene.rs
+// bevy-baked-gi/Crates/bevy-baked-gi/examples/scene.rs
+
+//! Renders one or more Bevy scenes in glTF or RON format, with baked global illumination applied.
 
 use bevy::asset::FileAssetIo;
 use bevy::core_pipeline::bloom::BloomSettings;

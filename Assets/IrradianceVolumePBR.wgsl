@@ -79,11 +79,8 @@ struct IrradianceData {
 }
 
 struct GridMetadata {
+    transform: mat4x4<f32>,
     resolution: vec3<i32>,
-    corner: vec3<f32>,
-    increment_x: vec3<f32>,
-    increment_y: vec3<f32>,
-    increment_z: vec3<f32>,
     level_bias: f32,
 }
 
@@ -202,11 +199,13 @@ fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) -> S
     let N = normalize(to_blender_coords(n));
     let R = normalize(to_blender_coords(r));
 
-    let corner = vec4(grid_data.metadata.corner, 1.0).xyz;
+    let corner = grid_data.metadata.transform[3].xyz;
+
+    // FIXME: This seems wrong for non-axis-aligned irradiance volumes...
     let increment = vec3(
-        vec4(grid_data.metadata.increment_x, 1.0).x,
-        vec4(grid_data.metadata.increment_y, 1.0).y,
-        vec4(grid_data.metadata.increment_z, 1.0).z,
+        grid_data.metadata.transform[0].x,
+        grid_data.metadata.transform[1].y,
+        grid_data.metadata.transform[2].z,
     );
 
     var localpos = (P - corner) / increment;
@@ -235,10 +234,7 @@ fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) -> S
         let irradiance = eevee_irradiance_from_cell_get(cell, N);
         let radiance = eevee_irradiance_from_cell_get(cell, R);
 
-        let ws_cell_location = grid_data.metadata.corner +
-            (grid_data.metadata.increment_x * cell_cos.x +
-             grid_data.metadata.increment_y * cell_cos.y +
-             grid_data.metadata.increment_z * cell_cos.z);
+        let ws_cell_location = (grid_data.metadata.transform * vec4(cell_cos, 1.0)).xyz;
 
         let ws_point_to_cell = ws_cell_location - P;
         let ws_dist_point_to_cell = length(ws_point_to_cell);

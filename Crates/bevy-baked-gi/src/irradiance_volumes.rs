@@ -1,5 +1,7 @@
 // bevy-baked-gi/Crates/bevy-baked-gi/src/irradiance_volumes.rs
 
+//! Baked voxel grids storing indirect light.
+
 use crate::{AabbExt, GiPbrMaterial, Lightmapped};
 use bevy::asset::{AssetLoader, Error as AnyhowError, LoadContext, LoadedAsset};
 use bevy::math::{ivec2, Vec3A};
@@ -34,11 +36,15 @@ pub struct IrradianceVolume {
 
 #[derive(Clone, Default, Reflect, Debug, ShaderType, Serialize, Deserialize)]
 pub struct IrradianceVolumeMetadata {
+    /// Transforms a canonical voxel cube with corners at (0, 0, 0) and (1, 1,
+    /// 1) to world space.  In other words, this matrix specifies a
+    /// transformation from a cube whose side length is 1 and centered at (0.5,
+    /// 0.5, 0.5), representing a *single* voxel (not the entire voxel grid), to
+    /// the scene's world space.
+    pub transform: Mat4,
+    /// The size of the voxel grid, in voxels.
     pub resolution: IVec3,
-    pub corner: Vec3,
-    pub increment_x: Vec3,
-    pub increment_y: Vec3,
-    pub increment_z: Vec3,
+    /// The LOD bias.
     pub level_bias: f32,
 }
 
@@ -51,6 +57,7 @@ pub struct ComputedIrradianceVolumeInfo {
     pub irradiance_volume_texture: Option<Handle<Image>>,
 }
 
+/// Loads irradiance volumes from `.voxelgi.bincode` files.
 pub struct IrradianceVolumeAssetLoader;
 
 #[derive(Clone, Default, Reflect, Debug, ShaderType)]
