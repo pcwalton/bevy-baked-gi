@@ -21,9 +21,11 @@ use std::sync::{Arc, Mutex};
 pub static LIGHTMAP_UV_ATTRIBUTE: MeshVertexAttribute =
     MeshVertexAttribute::new("LightmapUv", 0xbe293e1f, VertexFormat::Float32x2);
 
-/// Stores information about the currently-active lightmap on this entity's mesh.
+/// Stores information about the lightmap on this mesh.
 ///
-/// This component does nothing unless the Lightmapped component is present on the same entity.
+/// Entities with this component are unaffected by irradiance volumes and
+/// reflection probes, as `bevy-baked-gi` assumes that the lightmap provides
+/// more accurate global illumination than either of these.
 #[derive(Clone, Component, ExtractComponent, AsBindGroup, Reflect, Debug)]
 pub struct Lightmap {
     /// The lightmap applied to this mesh.
@@ -54,6 +56,7 @@ pub struct Lightmap {
 pub struct LightmapUvs {
     /// A handle to the mesh that the UVs are to be attached to.
     pub mesh_handle: Handle<Mesh>,
+
     /// The UVs themselves.
     pub uvs: Vec<[f32; 2]>,
 }
@@ -75,30 +78,6 @@ pub struct LightmappedGltfAssetLoader {
 /// Holds references to all lightmap UVs so that they don't get freed.
 #[derive(Clone, Default, TypePath, Deref, DerefMut, Resource)]
 pub(crate) struct LightmapUvKungFuDeathGrip(Arc<Mutex<HashSet<Handle<LightmapUvs>>>>);
-
-/// Attach this component to an entity with a Mesh in order to use lightmaps.
-///
-/// When this component is present, the real-time rendering of the mesh will be unaffected by lights
-/// containing the StaticLight component, as it's assumed that the lightmap for this mesh includes
-/// all the radiance coming from that light.
-///
-/// Entities with this component should have a Lightmap component as well, unless the lightmaps
-/// haven't been generated yet. Lightmappers that operate on Bevy scenes should look for entities
-/// with this component, compute lightmaps for them, and then attach a Lightmap component containing
-/// information about the resulting baked lighting.
-///
-/// To ensure proper lighting, the transform attached to the entity with this component should not
-/// change at runtime.
-#[derive(Reflect, Default, Clone, Component, ExtractComponent)]
-pub struct Lightmapped;
-
-/// Attach this component to a light to instruct Bevy to take this light into account when
-/// generating lightmaps and irradiance volumes.
-///
-/// Any light with StaticLight attached will be ignored when rendering meshes with the Lightmapped
-/// component, as it's expected that the lightmap includes all radiance coming from such lights.
-#[derive(Reflect, Default, Clone)]
-pub struct StaticLight;
 
 pub fn apply_gltf_lightmap_settings(
     mut commands: Commands,
@@ -136,8 +115,7 @@ pub fn apply_gltf_lightmap_settings(
             .insert(Lightmap {
                 image: lightmap.clone(),
                 uv_rect: lightmap_rect,
-            })
-            .insert(Lightmapped);
+            });
 
         info!(
             "Instantiated standard material with lightmap: {} and uv rect: {:?}",

@@ -4,11 +4,10 @@
 #![allow(clippy::type_complexity)]
 
 use crate::irradiance_volumes::{
-    ComputedIrradianceVolumeInfo, IrradianceGrid, IrradianceVolume, IrradianceVolumeAssetLoader,
-    IrradianceVolumeMetadata,
+    AppliedIrradianceVolume, IrradianceVolume, IrradianceVolumeMetadata,
 };
 use crate::lightmaps::{
-    Lightmap, LightmapUvKungFuDeathGrip, LightmapUvs, Lightmapped, LightmappedGltfAssetLoader,
+    Lightmap, LightmapUvKungFuDeathGrip, LightmapUvs, LightmappedGltfAssetLoader,
     LIGHTMAP_UV_ATTRIBUTE,
 };
 use crate::reflection_probes::AppliedReflectionProbe;
@@ -55,7 +54,6 @@ use bevy::render::texture::{CompressedImageFormats, FallbackImage};
 use bevy::render::view::{ExtractedView, VisibleEntities};
 use bevy::render::{ExtractSchedule, Render, RenderApp, RenderSet};
 use bevy::scene::Scene;
-use bevy::transform::TransformSystem;
 use bevy::utils::HashMap;
 use reflection_probes::ReflectionProbe;
 use serde::{Deserialize, Serialize};
@@ -233,36 +231,22 @@ impl Plugin for BakedGiPlugin {
         app.register_type::<IrradianceVolume>()
             .register_type::<GiPbrMaterial>()
             .register_type::<IrradianceVolumeMetadata>()
-            .register_type::<ComputedIrradianceVolumeInfo>()
+            .register_type::<AppliedIrradianceVolume>()
             .register_type::<Lightmap>()
-            .register_type::<Lightmapped>()
             .register_type::<GltfGiSettings>()
             .register_type::<GltfLightmapSettings>()
             .register_type::<ReflectionProbe>()
-            .add_asset::<IrradianceVolume>()
             .add_asset::<GiPbrMaterial>()
             .add_asset::<LightmapUvs>()
-            .add_asset_loader(IrradianceVolumeAssetLoader)
             .preregister_asset_loader(&["gi.gltf", "gi.glb"])
-            .init_resource::<IrradianceGrid>()
             .init_resource::<LightmapUvKungFuDeathGrip>()
             .add_plugins(ExtractComponentPlugin::<Handle<GiPbrMaterial>>::extract_visible())
-            .add_plugins(ExtractComponentPlugin::<ComputedIrradianceVolumeInfo>::extract_visible())
+            .add_plugins(ExtractComponentPlugin::<AppliedIrradianceVolume>::extract_visible())
             .add_plugins(ExtractComponentPlugin::<Lightmap>::extract_visible())
-            .add_plugins(ExtractComponentPlugin::<Lightmapped>::extract_visible())
             .add_plugins(ExtractComponentPlugin::<AppliedReflectionProbe>::extract_visible())
             .add_plugins(PrepassPipelinePlugin::<GiPbrMaterial>::default())
             .add_plugins(PrepassPlugin::<GiPbrMaterial>::default())
-            .add_systems(
-                PostUpdate,
-                irradiance_volumes::update_irradiance_grid
-                    .after(TransformSystem::TransformPropagate),
-            )
-            .add_systems(
-                PostUpdate,
-                irradiance_volumes::apply_irradiance_volumes
-                    .after(irradiance_volumes::update_irradiance_grid),
-            )
+            .add_systems(PostUpdate, irradiance_volumes::apply_irradiance_volumes)
             .add_systems(PostUpdate, reflection_probes::apply_reflection_probes)
             .add_systems(Update, parse_gltf_gi_settings)
             .add_systems(
@@ -334,7 +318,7 @@ pub fn prepare_gi_pbr_meshes(
         (
             Entity,
             &Handle<Mesh>,
-            Option<&ComputedIrradianceVolumeInfo>,
+            Option<&AppliedIrradianceVolume>,
             Option<&Lightmap>,
             Option<&AppliedReflectionProbe>,
         ),
@@ -615,7 +599,7 @@ impl FromWorld for GiPbrPipeline {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
         let irradiance_volume_bind_group_layout =
-            ComputedIrradianceVolumeInfo::bind_group_layout(render_device);
+            AppliedIrradianceVolume::bind_group_layout(render_device);
         let lightmap_bind_group_layout = Lightmap::bind_group_layout(render_device);
         let reflection_probe_bind_group_layout =
             AppliedReflectionProbe::bind_group_layout(render_device);

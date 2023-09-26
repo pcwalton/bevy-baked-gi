@@ -84,19 +84,18 @@ struct GridMetadata {
     level_bias: f32,
 }
 
-struct GridData {
+struct IrradianceVolumeDescriptor {
     metadata: GridMetadata,
     transform: mat4x4<f32>,
-    offset: i32,
 }
 
 #endif  // FRAGMENT_IRRADIANCE_VOLUME
 
 #ifdef FRAGMENT_IRRADIANCE_VOLUME
 @group(3) @binding(0)
-var<uniform> grid_data: GridData;
+var<uniform> irradiance_volume_descriptor: IrradianceVolumeDescriptor;
 @group(3) @binding(1)
-var irradiance_grid: texture_2d<f32>;
+var irradiance_volume_texture: texture_2d<f32>;
 #endif
 
 #ifdef VERTEX_LIGHTMAP_UVS
@@ -149,7 +148,7 @@ fn compute_ibl(
 #ifdef FRAGMENT_IRRADIANCE_VOLUME
 
 fn texel_fetch(st: vec2<i32>) -> vec4<f32> {
-    return textureLoad(irradiance_grid, st, 0);
+    return textureLoad(irradiance_volume_texture, st, 0);
 }
 
 fn to_blender_coords(p: vec3<f32>) -> vec3<f32> {
@@ -163,7 +162,7 @@ fn eevee_irradiance_decode(data: vec4<f32>) -> vec3<f32> {
 
 fn eevee_load_irradiance_cell(cell: i32, N: vec3<f32>) -> IrradianceData {
     var cell_co = vec2<i32>(3, 2);
-    let cell_per_row = i32(textureDimensions(irradiance_grid, 0).x) / cell_co.x;
+    let cell_per_row = i32(textureDimensions(irradiance_volume_texture, 0).x) / cell_co.x;
     cell_co.x *= cell % cell_per_row;
     cell_co.y *= cell / cell_per_row;
 
@@ -199,13 +198,13 @@ fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) -> S
     let N = normalize(to_blender_coords(n));
     let R = normalize(to_blender_coords(r));
 
-    let corner = grid_data.metadata.transform[3].xyz;
+    let corner = irradiance_volume_descriptor.metadata.transform[3].xyz;
 
     // FIXME: This seems wrong for non-axis-aligned irradiance volumes...
     let increment = vec3(
-        grid_data.metadata.transform[0].x,
-        grid_data.metadata.transform[1].y,
-        grid_data.metadata.transform[2].z,
+        irradiance_volume_descriptor.metadata.transform[0].x,
+        irradiance_volume_descriptor.metadata.transform[1].y,
+        irradiance_volume_descriptor.metadata.transform[2].z,
     );
 
     var localpos = (P - corner) / increment;
@@ -222,17 +221,18 @@ fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) -> S
         let cell_cos = clamp(
             localpos_floored + vec3<f32>(offset),
             vec3(0.0),
-            vec3<f32>(grid_data.metadata.resolution) - 1.0);
+            vec3<f32>(irradiance_volume_descriptor.metadata.resolution) - 1.0);
 
         let icell_cos = vec3<i32>(cell_cos);
-        let cell = grid_data.offset + icell_cos.z +
-            grid_data.metadata.resolution.z *
-            (icell_cos.y + grid_data.metadata.resolution.y * icell_cos.x);
+        let cell = icell_cos.z +
+            irradiance_volume_descriptor.metadata.resolution.z *
+            (icell_cos.y + irradiance_volume_descriptor.metadata.resolution.y * icell_cos.x);
 
         let irradiance = eevee_irradiance_from_cell_get(cell, N);
         let radiance = eevee_irradiance_from_cell_get(cell, R);
 
-        let ws_cell_location = (grid_data.metadata.transform * vec4(cell_cos, 1.0)).xyz;
+        let ws_cell_location =
+            (irradiance_volume_descriptor.metadata.transform * vec4(cell_cos, 1.0)).xyz;
 
         let ws_point_to_cell = ws_cell_location - P;
         let ws_dist_point_to_cell = length(ws_point_to_cell);
