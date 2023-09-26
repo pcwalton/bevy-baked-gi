@@ -62,15 +62,24 @@ static CUBEMAP_FACES: [(usize, CubeFaceRotation); 6] = [
     (3, CubeFaceRotation::None),
 ];
 
+/// Exports global illumination from a Blender file into a Bevy scene.
 #[derive(Parser, Resource, Clone)]
 #[command(author, version, about)]
 struct Args {
+    /// The input `.blend` file to unpack.
     #[arg()]
     input: PathBuf,
 
+    /// FIXME: This should be separate output directories for each type of asset.
     #[arg(short, long)]
     out_dir: Option<PathBuf>,
 
+    /// The path to the assets directory for the Bevy project that this global illumination will be
+    /// added to.
+    /// 
+    /// This is needed in order for `export-blender-gi` to refer to each asset
+    /// with the correct [HandleId], since handle IDs are hashed versions of
+    /// asset paths, and asset paths are relative to the assets directory.
     #[arg(short, long)]
     assets_dir: Option<PathBuf>,
 }

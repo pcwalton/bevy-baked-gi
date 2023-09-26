@@ -2,7 +2,6 @@
 
 //! Renders one or more Bevy scenes in glTF or RON format, with baked global illumination applied.
 
-use bevy::asset::FileAssetIo;
 use bevy::core_pipeline::bloom::BloomSettings;
 use bevy::core_pipeline::experimental::taa::TemporalAntiAliasBundle;
 use bevy::core_pipeline::tonemapping::Tonemapping;
@@ -10,8 +9,8 @@ use bevy::math::Vec3A;
 use bevy::pbr::ScreenSpaceAmbientOcclusionBundle;
 use bevy::prelude::{
     AmbientLight, App, AssetPlugin, AssetServer, Camera, Camera3dBundle, Changed, Color, Commands,
-    DirectionalLight, Msaa, Name, Plugin, PluginGroup, PointLight, Query, Res, ResMut, Resource,
-    Startup, Transform, Update, Vec3,
+    DirectionalLight, Msaa, Name, PluginGroup, PointLight, Query, Res, ResMut, Resource, Startup,
+    Transform, Update, Vec3,
 };
 use bevy::scene::{DynamicSceneBundle, SceneBundle};
 use bevy::DefaultPlugins;
@@ -19,7 +18,6 @@ use bevy_baked_gi::{BakedGiPlugin, Manifest};
 use bevy_egui::EguiPlugin;
 use bevy_view_controls_egui::{ControllableCamera, ViewControlsPlugin};
 use clap::Parser;
-use std::env;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::mem;
@@ -27,17 +25,27 @@ use std::path::PathBuf;
 
 const FERRIS_ROTATION_SPEED: f32 = 0.01;
 
-struct ExampleAssetIoPlugin;
-
+/// Displays one or more Bevy scenes with global illumination applied.
 #[derive(Parser, Resource)]
 #[command(author, version, about)]
 struct Args {
+    /// The scenes to display.
+    ///
+    /// Multiple scenes can be provided, and if so then all scenes will be
+    /// merged together and displayed at once.
     #[arg()]
     scene: Vec<PathBuf>,
 
+    /// The path to the manifest emitted by `export-blender-gi`.
+    ///
+    /// All assets within the manifest will be loaded.
     #[arg(short, long)]
     manifest: Vec<PathBuf>,
 
+    /// The directory that all assets are relative to.
+    ///
+    /// If loading a scene emitted with `export-blender-gi`, this must be the
+    /// same assets directory that was supplied to that tool.
     #[arg(short, long)]
     assets_dir: Option<PathBuf>,
 }
@@ -127,16 +135,6 @@ fn setup(mut commands: Commands, mut asset_server: ResMut<AssetServer>, args: Re
         .insert(Name::new("Ferris"));
 }
 
-impl Plugin for ExampleAssetIoPlugin {
-    fn build(&self, app: &mut App) {
-        let assets_root = match env::var("BEVY_ASSET_ROOT") {
-            Ok(dir_str) => PathBuf::from(dir_str),
-            Err(_) => PathBuf::from("../../Assets"),
-        };
-        app.insert_resource(AssetServer::new(FileAssetIo::new(assets_root, &None)));
-    }
-}
-
 fn rotate_ferris(mut query: Query<(&Name, &mut Transform)>) {
     for (name, mut transform) in query.iter_mut() {
         if &**name == "Ferris" {
@@ -145,6 +143,7 @@ fn rotate_ferris(mut query: Query<(&Name, &mut Transform)>) {
     }
 }
 
+/// Applies shadow maps to every directional and point light in the scene.
 fn apply_shadows_to_lights(
     mut directional_lights: Query<&mut DirectionalLight, Changed<DirectionalLight>>,
     mut point_lights: Query<&mut PointLight, Changed<PointLight>>,

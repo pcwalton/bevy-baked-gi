@@ -720,8 +720,7 @@ where
     }
 }
 
-/// A system that upgrades non-lightmapped StandardMaterials to [GiPbrMaterial]s if they aren't
-/// lightmapped.
+/// A system that upgrades all [StandardMaterial]s to [GiPbrMaterial]s.
 pub fn upgrade_pbr_materials(
     mut commands: Commands,
     standard_material_query: Query<(
