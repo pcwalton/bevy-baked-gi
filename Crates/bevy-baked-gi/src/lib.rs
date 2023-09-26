@@ -228,7 +228,7 @@ trait AabbExt {
     /// Returns an AABB with corners at (-1, -1, -1) and (1, 1, 1).
     ///
     /// That is, the resulting AABB has a center at the origin, and every side
-    /// has length of 2 units.
+    /// has a length of 2 units.
     fn centered_unit_cube() -> Self;
 }
 
