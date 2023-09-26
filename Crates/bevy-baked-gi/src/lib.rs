@@ -2,6 +2,7 @@
 
 #![doc = include_str!("../../../README.md")]
 #![allow(clippy::type_complexity)]
+#![warn(missing_docs)]
 
 use crate::irradiance_volumes::{
     AppliedIrradianceVolume, IrradianceVolume, IrradianceVolumeMetadata,
@@ -66,7 +67,7 @@ pub mod irradiance_volumes;
 pub mod lightmaps;
 pub mod reflection_probes;
 
-/// Add this plugin to your App in order to enable baked global illumination.
+/// Add this plugin to your [App] in order to enable baked global illumination.
 #[derive(Default)]
 pub struct BakedGiPlugin {
     /// Extra application-specific vertex attributes that will be parsed in glTF meshes.
@@ -97,8 +98,11 @@ pub struct GiPbrPipeline {
 #[uuid = "d18d9aa6-5053-4cb4-8b59-a1b2d1e6b6db"]
 pub struct GiPbrMaterial(pub StandardMaterial);
 
+/// A component that belongs to the render world and encapsulates the prepared
+/// bind group.
 #[derive(Component)]
 pub struct RenderGiPbrData {
+    /// The prepared shader bind group for the lighting.
     pub lighting: PreparedBindGroup<()>,
 }
 
@@ -130,9 +134,13 @@ pub type DrawGiPbrMaterial = (
     DrawMesh,
 );
 
+/// A key that uniquely identifies a specialized baked GI PBR material.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct GiPbrPipelineKey {
+    /// The wrapped material pipeline key.
     pub material: MaterialPipelineKey<GiPbrMaterial>,
+
+    /// The type of baked global illumination.
     pub lighting: GiType,
 }
 
@@ -171,17 +179,26 @@ pub struct GltfLightmapSettings {
 /// glTF extras.
 #[derive(Thiserror, Debug)]
 pub enum GltfGiSettingsParseError {
+    /// The glTF extras weren't valid JSON.
     #[error("The glTF extras weren't valid JSON")]
     Serde(#[from] SerdeJsonError),
+
+    /// The glTF extras had the wrong structure (not an object).
     #[error("The glTF extras were malformed")]
     MalformedExtras,
-    #[error("The DisableGi field wasn't a boolean")]
+
+    /// The `DisableGi` field wasn't a boolean.
+    #[error("The `DisableGi` field wasn't a boolean")]
     MalformedDisableGi,
-    #[error("The Lightmap field wasn't a valid path")]
+    /// The `Lightmap` field didn't name a valid path.
+    #[error("The `Lightmap` field wasn't a valid path")]
     MalformedLightmap,
+
+    /// The `LightmapMinU`/`LightmapMinV`/`LightmapMaxU`/`LightmapMaxV` fields
+    /// weren't all present and numeric.
     #[error(
-        "The LightmapMinU/LightmapMinV/LightmapMaxU/LightmapMaxV fields weren't all present and \
-numeric"
+        "The `LightmapMinU`/`LightmapMinV`/`LightmapMaxU`/`LightmapMaxV` fields \
+weren't all present and numeric"
     )]
     MalformedLightmapCoords,
 }
@@ -215,14 +232,15 @@ trait AabbExt {
     fn centered_unit_cube() -> Self;
 }
 
-pub const SHADER_HANDLE: HandleUntyped =
+/// A handle to the main baked global illumination PBR shader handle.
+pub const BAKED_GI_PBR_SHADER_HANDLE: HandleUntyped =
     HandleUntyped::weak_from_u64(Shader::TYPE_UUID, 0xa68b654e530a1882);
 
 impl Plugin for BakedGiPlugin {
     fn build(&self, app: &mut App) {
         load_internal_asset!(
             app,
-            SHADER_HANDLE,
+            BAKED_GI_PBR_SHADER_HANDLE,
             "../assets/BakedGIPBR.wgsl",
             Shader::from_wgsl
         );
@@ -384,9 +402,6 @@ pub fn prepare_gi_pbr_meshes(
 ///
 /// This is copied from `bevy_pbr::material::queue_material_meshes` and modified
 /// to support baked global illumination.
-///
-/// When this goes upstream, this can either be refactored to avoid duplication or else just merged
-/// into `queue_material_meshes`.
 #[allow(clippy::too_many_arguments)]
 pub fn queue_gi_pbr_material_meshes(
     opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
@@ -420,6 +435,9 @@ pub fn queue_gi_pbr_material_meshes(
         &mut RenderPhase<Transparent3d>,
     )>,
 ) {
+    // When this goes upstream, this can either be refactored to avoid
+    // duplication or else just merged into `queue_material_meshes`.
+
     for (
         view,
         visible_entities,
@@ -903,11 +921,11 @@ impl AsBindGroup for GiPbrMaterial {
 
 impl Material for GiPbrMaterial {
     fn vertex_shader() -> ShaderRef {
-        SHADER_HANDLE.typed().into()
+        BAKED_GI_PBR_SHADER_HANDLE.typed().into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        SHADER_HANDLE.typed().into()
+        BAKED_GI_PBR_SHADER_HANDLE.typed().into()
     }
 
     fn prepass_fragment_shader() -> ShaderRef {

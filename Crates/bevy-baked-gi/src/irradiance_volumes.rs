@@ -28,10 +28,17 @@ pub const IRRADIANCE_GRID_BYTES_PER_CELL: usize =
 #[uuid = "0adffc01-d268-4441-a9ea-a236679590b0"]
 #[reflect(Component)]
 pub struct IrradianceVolume {
+    /// General information about this irradiance volume, such as its
+    /// resolution.
     pub meta: IrradianceVolumeMetadata,
+
+    /// The actual irradiance volume data.
+    /// 
+    /// You can generate this with `export-blender-gi`.
     pub image: Handle<Image>,
 }
 
+/// General information about each irradiance volume, such as its resolution.
 #[derive(Clone, Default, Reflect, Debug, ShaderType, Serialize, Deserialize)]
 pub struct IrradianceVolumeMetadata {
     /// Transforms a canonical voxel cube with corners at (0, 0, 0) and (1, 1,
@@ -48,11 +55,19 @@ pub struct IrradianceVolumeMetadata {
     pub level_bias: f32,
 }
 
-/// Stores information about the irradiance volume on this entity.
+/// Stores information about the irradiance volume on this entity so that the
+/// shader can access it.
+/// 
+/// You don't need to add this component yourself; the
+/// [apply_irradiance_volumes] system automatically detects and applies it to
+/// entities that contain GI PBR materials as appropriate.
 #[derive(Clone, Component, ExtractComponent, AsBindGroup, Default, Reflect)]
 pub struct AppliedIrradianceVolume {
+    /// Metadata about the irradiance volume.
     #[uniform(0)]
     pub irradiance_volume_descriptor: IrradianceVolumeDescriptor,
+
+    /// A handle to the actual irradiance volume texture.
     #[texture(1)]
     pub irradiance_volume_texture: Option<Handle<Image>>,
 }
@@ -69,6 +84,8 @@ pub struct IrradianceVolumeDescriptor {
     pub transform: Mat4,
 }
 
+/// A system that determines which irradiance volumes apply to each object and assigns
+/// [AppliedIrradianceVolume] components to affected objects.
 pub fn apply_irradiance_volumes(
     mut commands: Commands,
     irradiance_volume_query: Query<(&IrradianceVolume, &GlobalTransform)>,
@@ -104,6 +121,7 @@ pub fn apply_irradiance_volumes(
 }
 
 impl IrradianceVolumeMetadata {
+    /// The total number of voxels present in the irradiance volume.
     pub fn sample_count(&self) -> usize {
         self.resolution.x as usize * self.resolution.y as usize * self.resolution.z as usize
     }

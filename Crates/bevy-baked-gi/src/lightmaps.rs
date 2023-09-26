@@ -18,6 +18,9 @@ use gltf::buffer::Source;
 use gltf::{Gltf as GGltf, Mesh as GMesh, Primitive, Semantic};
 use std::sync::{Arc, Mutex};
 
+/// The mesh vertex attribute used for lightmap UVs.
+///
+/// This is named `LightmapUv` and is a `vec2f`.
 pub static LIGHTMAP_UV_ATTRIBUTE: MeshVertexAttribute =
     MeshVertexAttribute::new("LightmapUv", 0xbe293e1f, VertexFormat::Float32x2);
 
@@ -79,6 +82,8 @@ pub struct LightmappedGltfAssetLoader {
 #[derive(Clone, Default, TypePath, Deref, DerefMut, Resource)]
 pub(crate) struct LightmapUvKungFuDeathGrip(Arc<Mutex<HashSet<Handle<LightmapUvs>>>>);
 
+/// A system that applies the lightmap settings that the
+/// [crate::parse_gltf_gi_settings] system added to this entity.
 pub fn apply_gltf_lightmap_settings(
     mut commands: Commands,
     standard_material_query: Query<(Entity, &Handle<StandardMaterial>, &GltfGiSettings)>,

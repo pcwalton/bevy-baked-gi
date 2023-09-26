@@ -18,13 +18,22 @@ use bevy::render::render_resource::AsBindGroup;
 /// reflection probe uses the diffuse and specular cubemaps stored here for
 /// diffuse and specular reflections, respectively. These reflections reflect
 /// static geometry only, so they won't reflect objects that move. The benefit
-/// is that, because these reflections are precomputed, they're cheap at
-/// runtime.
+/// is that, because these reflections are precomputed, they're cheap to render
+/// with at runtime.
+///
+/// The two maps can be generated with the [glTF IBL Sampler]. The accompanying
+/// `export-blender-gi` tool automatically runs an embedded copy of the sampler
+/// on the baked cubemaps it extracts from Blender.
+///
+/// [glTF IBL Sampler]: https://github.com/KhronosGroup/glTF-IBL-Sampler
 #[derive(Component, Clone, Default, Reflect, Debug, TypeUuid)]
 #[uuid = "0fb4528e-7992-41cf-a4d9-445e1fcf055e"]
 #[reflect(Component)]
 pub struct ReflectionProbe {
+    /// The cubemap containing the diffuse component of the reflection probe.
     pub diffuse_map: Handle<Image>,
+
+    /// The cubemap containing the specular component of the reflection probe.
     pub specular_map: Handle<Image>,
 }
 
