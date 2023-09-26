@@ -232,7 +232,7 @@ trait AabbExt {
     fn centered_unit_cube() -> Self;
 }
 
-/// A handle to the main baked global illumination PBR shader handle.
+/// A handle to the main baked global illumination PBR shader.
 pub const BAKED_GI_PBR_SHADER_HANDLE: HandleUntyped =
     HandleUntyped::weak_from_u64(Shader::TYPE_UUID, 0xa68b654e530a1882);
 
