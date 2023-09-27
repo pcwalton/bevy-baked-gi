@@ -1,4 +1,4 @@
-// bevy-baked-gi/UnityAssets/Editor/BevyLightmapper.cs
+// bevy-baked-gi/UnityAssets/Editor/GLTFLightmapper.cs
 
 using C;
 using GLTFast;
