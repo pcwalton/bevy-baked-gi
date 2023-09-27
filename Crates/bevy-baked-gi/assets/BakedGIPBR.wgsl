@@ -72,6 +72,15 @@ struct SplitSum {
     radiance: vec3<f32>,
 }
 
+#ifdef VERTEX_LIGHTMAP_UVS
+
+struct LightmapSettings {
+    uv_rect: vec4<f32>,
+    exposure: f32,
+}
+
+#endif
+
 #ifdef FRAGMENT_IRRADIANCE_VOLUME
 
 struct IrradianceData {
@@ -104,7 +113,7 @@ var lightmap_texture: texture_2d<f32>;
 @group(3) @binding(1)
 var lightmap_sampler: sampler;
 @group(3) @binding(2)
-var<uniform> lightmap_uv_rect: vec4<f32>;
+var<uniform> lightmap_settings: LightmapSettings;
 #endif
 
 #ifdef FRAGMENT_REFLECTION_PROBE
@@ -390,8 +399,7 @@ fn pbr(
     var indirect_light = ambient::ambient_light(in.world_position, in.N, in.V, NdotV, diffuse_color, F0, perceptual_roughness, occlusion);
 
 #ifdef VERTEX_LIGHTMAP_UVS
-    // FIXME: Make this exposure configurable!!!
-    indirect_light += textureSample(lightmap_texture, lightmap_sampler, lightmap_uv).rgb * 0.00075 * diffuse_color;
+    indirect_light += textureSample(lightmap_texture, lightmap_sampler, lightmap_uv).rgb * lightmap_settings.exposure * diffuse_color;
 #else
 #ifdef FRAGMENT_REFLECTION_PROBE
     let environment_light = reflection_probe_light(perceptual_roughness, roughness, diffuse_color, NdotV, f_ab, in.N, R, F0);
@@ -522,7 +530,7 @@ fn fragment(
 #endif
 
 #ifdef VERTEX_LIGHTMAP_UVS
-    let lightmap_uv = mix(lightmap_uv_rect.xy, lightmap_uv_rect.zw, in.lightmap_uv);
+    let lightmap_uv = mix(lightmap_settings.uv_rect.xy, lightmap_settings.uv_rect.zw, in.lightmap_uv);
 #else
     let lightmap_uv = vec2(0.0);
 #endif

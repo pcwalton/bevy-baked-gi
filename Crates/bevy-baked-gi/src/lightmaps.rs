@@ -5,6 +5,7 @@
 use crate::{GiPbrMaterial, GltfGiSettings};
 use bevy::asset::{AssetLoader, AssetPath, Error as AnyhowError, LoadContext, LoadedAsset};
 use bevy::gltf::{GltfError, GltfLoader};
+use bevy::math::vec4;
 use bevy::prelude::{
     error, info, warn, AssetEvent, AssetServer, Assets, Commands, Component, Deref, DerefMut,
     Entity, EventReader, Handle, Image, Mesh, Query, Res, ResMut, Resource, StandardMaterial, Vec4,
@@ -12,7 +13,7 @@ use bevy::prelude::{
 use bevy::reflect::{Reflect, TypePath, TypeUuid};
 use bevy::render::extract_component::ExtractComponent;
 use bevy::render::mesh::MeshVertexAttribute;
-use bevy::render::render_resource::{AsBindGroup, VertexFormat};
+use bevy::render::render_resource::{AsBindGroup, VertexFormat, ShaderType};
 use bevy::utils::{BoxedFuture, HashSet};
 use gltf::buffer::Source;
 use gltf::{Gltf as GGltf, Mesh as GMesh, Primitive, Semantic};
@@ -36,6 +37,14 @@ pub struct Lightmap {
     #[sampler(1)]
     pub image: Handle<Image>,
 
+    /// Various settings relating to the lightmap.
+    #[uniform(2)]
+    pub settings: LightmapSettings,
+}
+
+/// Various settings relating to the lightmap.
+#[derive(Clone, Reflect, ShaderType, Debug)]
+pub struct LightmapSettings {
     /// The subrectangle of the lightmap texture that the lightmap UVs are relative to.
     ///
     /// The presence of this field allows the same mesh, including lightmap UVs, to be instantiated
@@ -44,8 +53,14 @@ pub struct Lightmap {
     /// The *x* and *y* components of this Vec4 are the minimum *u* and *v* coordinates of the
     /// rectangle respectively, and the *z* and *w* components are the maximum *u* and *v*
     /// coordinates of the rectangle. All components are between 0 and 1 inclusive.
-    #[uniform(2)]
     pub uv_rect: Vec4,
+
+    /// A factor that the lightmap lumels will be multiplied with.
+    ///
+    /// Higher values are brighter.
+    ///
+    /// The default value is 0.00075.
+    pub exposure: f32,
 }
 
 /// Temporarily stores the lightmap UVs for a mesh.
@@ -66,7 +81,7 @@ pub struct LightmapUvs {
 
 /// An asset loader for lightmapped glTF scenes ending in `.gi.gltf` or
 /// `.gi.glb`.
-/// 
+///
 /// Asset files containing a `.gi.gltf`/`.gi.glb` extension are processed for
 /// lightmaps, in addition to being loaded with the standard Bevy glTF loader.
 pub struct LightmappedGltfAssetLoader {
@@ -119,7 +134,10 @@ pub fn apply_gltf_lightmap_settings(
             .insert(new_lightmapped_material)
             .insert(Lightmap {
                 image: lightmap.clone(),
-                uv_rect: lightmap_rect,
+                settings: LightmapSettings {
+                    uv_rect: lightmap_rect,
+                    ..LightmapSettings::default()
+                },
             });
 
         info!(
@@ -255,4 +273,13 @@ async fn load_buffers(gltf: &GGltf) -> Result<Vec<Vec<u8>>, GltfError> {
     }
 
     Ok(buffer_data)
+}
+
+impl Default for LightmapSettings {
+    fn default() -> Self {
+        LightmapSettings {
+            uv_rect: vec4(0.0, 0.0, 1.0, 1.0),
+            exposure: 0.00075,
+        }
+    }
 }
