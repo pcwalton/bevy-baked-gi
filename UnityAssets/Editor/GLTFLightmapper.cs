@@ -15,7 +15,7 @@ using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEditor;
 
-namespace Bevy.Lightmapper
+namespace GLTFLightmapper
 {
 internal class GameObjectLightmapInfo {
 	public UnityEngine.Mesh Mesh;
@@ -35,9 +35,10 @@ public class LightmapperUI : EditorWindow
 	private string mOutputFilePath;
 	private string mOutputLightmapDirPath;
 
-	[MenuItem("Window/Bevy Lightmapper")]
+	[MenuItem("Window/glTF Lightmapper")]
 	public static void ShowWindow() {
-		EditorWindow.GetWindow(typeof(LightmapperUI));
+		LightmapperUI lightmapperUI = EditorWindow.GetWindow<LightmapperUI>();
+		lightmapperUI.titleContent = new GUIContent("glTF Lightmapper");
 	}
 
 	private void SetInputFilePath(string newInputFilePath) {
@@ -80,27 +81,24 @@ public class LightmapperUI : EditorWindow
 		                                                                    typeof(GameObject),
 		                                                                    true);
 		if (newInputPrefab != mInputPrefab) {
-			string newInputPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(
-				newInputPrefab);
-			if (newInputPath != null)
-				mInputPrefab = newInputPrefab;
+			if (newInputPrefab == null) {
+				mInputPrefab = null;
+			}else {
+				string newInputPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(
+					newInputPrefab);
+				if (newInputPath != null) {
+					mInputPrefab = newInputPrefab;
+					SetInputFilePath(newInputPath);
+				}
+			}
 		}
 
 		// Input file
 
-		GUILayout.BeginHorizontal();
-
-		string newInputFilePath = EditorGUILayout.TextField("glTF Input File:", mInputFilePath);
-		if (newInputFilePath != mInputFilePath)
-			SetInputFilePath(newInputFilePath);
-
-		if (GUILayout.Button("Browse…", GUILayout.ExpandWidth(false))) {
-			newInputFilePath = EditorUtility.OpenFilePanel("Bevy Lightmapper", "", "glb,gltf");
-			if (newInputFilePath != null)
-				SetInputFilePath(newInputFilePath);
+		using (new EditorGUI.DisabledScope(true))
+		{
+			EditorGUILayout.TextField("glTF Input File:", mInputFilePath);
 		}
-
-		GUILayout.EndHorizontal();
 
 		// Output file
 
@@ -110,7 +108,9 @@ public class LightmapperUI : EditorWindow
 		if (newOutputFilePath != mOutputFilePath)
 			SetOutputFilePath(newOutputFilePath);
 
-		if (GUILayout.Button("Browse…", GUILayout.ExpandWidth(false))) {
+		if (GUILayout.Button(EditorGUIUtility.FindTexture("FolderOpened Icon"),
+		                     GUILayout.ExpandWidth(false),
+		                     GUILayout.MaxHeight(18.0f))) {
 			string directory = GetSuitableDirectoryForOutputBrowser();
 
 			string basename =
@@ -121,7 +121,7 @@ public class LightmapperUI : EditorWindow
 				basename = "";
 			basename += ".glb";
 
-			newOutputFilePath = EditorUtility.SaveFilePanel("Bevy Lightmapper", directory,
+			newOutputFilePath = EditorUtility.SaveFilePanel("glTF Lightmapper", directory,
 			                                                basename, "glb");
 			if (newOutputFilePath != null)
 				SetOutputFilePath(newOutputFilePath);
@@ -133,26 +133,27 @@ public class LightmapperUI : EditorWindow
 
 		GUILayout.BeginHorizontal();
 
-		mOutputLightmapDirPath = EditorGUILayout.TextField("Lightmap Output Folder:",
+		mOutputLightmapDirPath = EditorGUILayout.TextField("Lightmap Folder:",
 		                                                   mOutputLightmapDirPath);
 
-		if (GUILayout.Button("Browse…", GUILayout.ExpandWidth(false))) {
+		if (GUILayout.Button(EditorGUIUtility.FindTexture("FolderOpened Icon"),
+		                     GUILayout.ExpandWidth(false),
+		                     GUILayout.MaxHeight(18.0f))) {
 			string directory = GetSuitableDirectoryForOutputBrowser();
 
-			mOutputLightmapDirPath = EditorUtility.OpenFolderPanel("Bevy Lightmapper", directory,
+			mOutputLightmapDirPath = EditorUtility.OpenFolderPanel("glTF Lightmapper", directory,
 			                                                       "");
 		}
 
 		GUILayout.EndHorizontal();
 
-		// Export Lightmap UVs button
-		if (GUILayout.Button("Export Lightmap UVs"))
-			ExportLightmapUVs();
-
-		// Export Lightmaps button
-
-		if (GUILayout.Button("Export Lightmaps"))
+		// Export Lightmap Images button
+		if (GUILayout.Button("Export Lightmap Images"))
 			ExportLightmaps();
+
+		// Export Modified glTF button
+		if (GUILayout.Button("Export Modified glTF"))
+			ExportModifiedGLTF();
 	}
 
 	private void ProcessNewlyImportedGameObject(GameObject gameObject,
@@ -219,7 +220,7 @@ public class LightmapperUI : EditorWindow
 		                 lightmapColor.name + ".hdr");
 	}
 
-	private void ExportLightmapUVs() {
+	private void ExportModifiedGLTF() {
 		var gltf = ModelRoot.Load(mInputFilePath, new ReadSettings {
 				Validation = SharpGLTF.Validation.ValidationMode.Skip
 			});
@@ -242,7 +243,7 @@ public class LightmapperUI : EditorWindow
 			usedMeshes.Add(lightmapInfo.Mesh.name, lightmapInfo.Mesh);
 		}
 
-		ExportLightmapUVsForGLTFNode(gltf, usedMeshes, scene);
+		ExportModifiedGLTFForGLTFNode(gltf, usedMeshes, scene);
 		WriteLightmapPathsToGLTFNodes(gltf, usedMeshes, scene);
 
 		gltf.SaveGLB(mOutputFilePath, new WriteSettings {
@@ -250,7 +251,7 @@ public class LightmapperUI : EditorWindow
 			});
 	}
 
-	private void ExportLightmapUVsForGLTFNode(
+	private void ExportModifiedGLTFForGLTFNode(
 		ModelRoot gltf,
 		Dictionary<string, UnityEngine.Mesh> usedMeshes,
 		IVisualNodeContainer nodeContainer) {
@@ -329,7 +330,7 @@ public class LightmapperUI : EditorWindow
 		}
 
 		foreach (var kid in nodeContainer.VisualChildren)
-			ExportLightmapUVsForGLTFNode(gltf, usedMeshes, kid);
+			ExportModifiedGLTFForGLTFNode(gltf, usedMeshes, kid);
 	}
 
 	private void RewriteMeshAttributeBuffer<UnityType, GLTFType>(UnityEngine.Mesh unityMesh,

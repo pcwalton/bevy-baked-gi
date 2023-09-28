@@ -167,6 +167,7 @@ pub struct GltfLightmapSettings {
     ///
     /// FIXME: Make sure it actually is relative to that!
     pub path: PathBuf,
+
     /// The UV rectangle within the lightmap texture that contains the baked
     /// lumels for this object.
     ///
