@@ -157,23 +157,24 @@ fn compute_ibl(
 
 #ifdef FRAGMENT_IRRADIANCE_VOLUME
 
+// This is based on Blender Eevee's shader for sampling irradiance volumes, heavily modified for
+// our use case.
+
 fn voxelgi_fetch_and_decode(st: vec2<i32>) -> vec3<f32> {
     let data = textureLoad(irradiance_volume_texture, st, 0);
     return data.rgb * exp2(data.a * 255.0 - 128.0);
 }
 
-fn voxelgi_load_irradiance_cell(cell: i32, N: vec3<f32>) -> mat3x3<f32> {
-    var cell_co = vec2<i32>(3, 2);
-    let cell_per_row = i32(textureDimensions(irradiance_volume_texture, 0).x) / cell_co.x;
-    cell_co.x *= cell % cell_per_row;
-    cell_co.y *= cell / cell_per_row;
+fn voxelgi_load_irradiance_cell(cell_index: i32, N: vec3<f32>) -> mat3x3<f32> {
+    let cells_per_row = i32(textureDimensions(irradiance_volume_texture, 0).x) / 3;
+    let cell_origin = vec2(cell_index % cells_per_row * 3, cell_index / cells_per_row * 2);
 
-    let is_negative = vec3<i32>(step(vec3<f32>(0.0), -N));
+    let is_negative = vec3<i32>(N < vec3(0.0));
 
     return mat3x3<f32>(
-        voxelgi_fetch_and_decode(cell_co + vec2(0, is_negative.x)),
-        voxelgi_fetch_and_decode(cell_co + vec2(1, is_negative.y)),
-        voxelgi_fetch_and_decode(cell_co + vec2(2, is_negative.z)));
+        voxelgi_fetch_and_decode(cell_origin + vec2(0, is_negative.x)),
+        voxelgi_fetch_and_decode(cell_origin + vec2(1, is_negative.y)),
+        voxelgi_fetch_and_decode(cell_origin + vec2(2, is_negative.z)));
 }
 
 fn voxelgi_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) -> SplitSum {
@@ -181,9 +182,15 @@ fn voxelgi_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) ->
     let N = normalize(n);
     let R = normalize(r);
 
-    let localpos = (irradiance_volume_descriptor.metadata.inverse_transform * vec4(P, 1.0)).xyz;
-    let localpos_floored = floor(localpos);
-    let trilinear_weight = fract(localpos);
+    let resolution = irradiance_volume_descriptor.metadata.resolution;
+    let transform = irradiance_volume_descriptor.metadata.transform;
+    let inverse_transform = irradiance_volume_descriptor.metadata.inverse_transform;
+
+    let max_cell = vec3<f32>(resolution) - 1.0;
+
+    let local_space_pos = (inverse_transform * vec4(P, 1.0)).xyz;
+    let local_space_pos_floored = floor(local_space_pos);
+    let trilinear_weight = fract(local_space_pos);
 
     var weight_accum = 0.0;
     var irradiance_accum = vec3(0.0);
@@ -191,27 +198,17 @@ fn voxelgi_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) ->
 
     for (var i = 0; i < 8; i++) {
         let offset = vec3(i, i / 2, i / 4) & vec3(1);
-        let cell_cos = clamp(
-            localpos_floored + vec3<f32>(offset),
-            vec3(0.0),
-            vec3<f32>(irradiance_volume_descriptor.metadata.resolution) - 1.0);
+        let cell_center = clamp(local_space_pos_floored + vec3<f32>(offset), vec3(0.0), max_cell);
+        let cell_index = i32(cell_center.z) +
+            resolution.z * (i32(cell_center.y) + resolution.y * i32(cell_center.x));
 
-        let icell_cos = vec3<i32>(cell_cos);
-        let cell = icell_cos.z +
-            irradiance_volume_descriptor.metadata.resolution.z *
-            (icell_cos.y + irradiance_volume_descriptor.metadata.resolution.y * icell_cos.x);
+        let irradiance = voxelgi_load_irradiance_cell(cell_index, N) * (N * N);
+        let radiance = voxelgi_load_irradiance_cell(cell_index, R) * (R * R);
 
-        let irradiance = voxelgi_load_irradiance_cell(cell, N) * (N * N);
-        let radiance = voxelgi_load_irradiance_cell(cell, R) * (R * R);
+        let world_space_cell_center = (transform * vec4(cell_center, 1.0)).xyz;
 
-        let ws_cell_location =
-            (irradiance_volume_descriptor.metadata.transform * vec4(cell_cos, 1.0)).xyz;
-
-        let ws_point_to_cell = ws_cell_location - P;
-        let ws_dist_point_to_cell = length(ws_point_to_cell);
-        let ws_light = ws_point_to_cell / ws_dist_point_to_cell;
-
-        var weight = clamp(dot(ws_light, N), 0.0, 1.0) + 1.0;
+        // FIXME: I think this is wrong until we stop switching P's axes.
+        var weight = clamp(dot(normalize(world_space_cell_center - P), N), 0.0, 1.0) + 1.0;
         let trilinear = mix(1.0 - trilinear_weight, trilinear_weight, vec3<f32>(offset));
         weight = max(0.00001, weight * trilinear.x * trilinear.y * trilinear.z);
 
