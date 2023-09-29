@@ -264,13 +264,16 @@ fn extract_irradiance_volumes(
             continue;
         }
 
+        let transform = Mat4::from_cols(
+            Vec3::from_slice(&grid_data.get_f32_vec("increment_x")).extend(0.0),
+            Vec3::from_slice(&grid_data.get_f32_vec("increment_y")).extend(0.0),
+            Vec3::from_slice(&grid_data.get_f32_vec("increment_z")).extend(0.0),
+            Vec3::from_slice(&grid_data.get_f32_vec("corner")).extend(1.0),
+        );
+
         let meta = IrradianceVolumeMetadata {
-            transform: Mat4::from_cols(
-                Vec3::from_slice(&grid_data.get_f32_vec("increment_x")).extend(0.0),
-                Vec3::from_slice(&grid_data.get_f32_vec("increment_y")).extend(0.0),
-                Vec3::from_slice(&grid_data.get_f32_vec("increment_z")).extend(0.0),
-                Vec3::from_slice(&grid_data.get_f32_vec("corner")).extend(1.0),
-            ),
+            transform,
+            inverse_transform: transform.inverse(),
             resolution,
             level_bias: grid_data.get_f32("level_bias"),
         };
@@ -289,14 +292,20 @@ fn extract_irradiance_volumes(
                 src_sample_index % cells_per_row * 3,
                 src_sample_index / cells_per_row * 2,
             );
-            for y in 0..2 {
-                for x in 0..3 {
-                    grid_sample_data.extend_from_slice(&get_texel(
-                        &grid_texture_data,
-                        origin + ivec2(x, y),
-                        grid_stride,
-                    ));
-                }
+
+            for bevy_offset in [
+                ivec2(0, 0), // Blender +X, Bevy +X
+                ivec2(0, 1), // Blender -X, Bevy -X
+                ivec2(2, 1), // Blender +Y, Bevy -Z
+                ivec2(2, 0), // Blender -Y, Bevy +Z
+                ivec2(1, 0), // Blender +Z, Bevy +Y
+                ivec2(1, 1), // Blender -Z, Bevy -Y
+            ] {
+                grid_sample_data.extend_from_slice(&get_texel(
+                    &grid_texture_data,
+                    origin + bevy_offset,
+                    grid_stride,
+                ));
             }
         }
 

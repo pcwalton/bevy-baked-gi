@@ -48,6 +48,10 @@ pub struct IrradianceVolumeMetadata {
     /// the scene's world space.
     pub transform: Mat4,
 
+    /// The above matrix, inverted. That is, a transformation from world space
+    /// to voxel space.
+    pub inverse_transform: Mat4,
+
     /// The size of the voxel grid, in voxels.
     pub resolution: IVec3,
 

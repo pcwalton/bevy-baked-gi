@@ -87,14 +87,15 @@ struct IrradianceData {
     cubesides: array<vec3<f32>, 3>,
 }
 
-struct GridMetadata {
+struct IrradianceVolumeMetadata {
     transform: mat4x4<f32>,
+    inverse_transform: mat4x4<f32>,
     resolution: vec3<i32>,
     level_bias: f32,
 }
 
 struct IrradianceVolumeDescriptor {
-    metadata: GridMetadata,
+    metadata: IrradianceVolumeMetadata,
     transform: mat4x4<f32>,
 }
 
@@ -204,9 +205,10 @@ fn eevee_irradiance_from_cell_get(cell: i32, ir_dir: vec3<f32>) -> vec3<f32> {
 
 fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) -> SplitSum {
     let P = to_blender_coords(p);
-    let N = normalize(to_blender_coords(n));
-    let R = normalize(to_blender_coords(r));
+    let N = normalize(n);
+    let R = normalize(r);
 
+    /*
     let corner = irradiance_volume_descriptor.metadata.transform[3].xyz;
 
     // FIXME: This seems wrong for non-axis-aligned irradiance volumes...
@@ -215,9 +217,10 @@ fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) -> S
         irradiance_volume_descriptor.metadata.transform[1].y,
         irradiance_volume_descriptor.metadata.transform[2].z,
     );
+    */
 
-    var localpos = (P - corner) / increment;
-
+    let localpos = (irradiance_volume_descriptor.metadata.inverse_transform * vec4(P, 1.0)).xyz;
+    //var localpos = (P - corner) / increment;
     let localpos_floored = floor(localpos);
     let trilinear_weight = fract(localpos);
 
