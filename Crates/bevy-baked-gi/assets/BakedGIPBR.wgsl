@@ -157,20 +157,12 @@ fn compute_ibl(
 
 #ifdef FRAGMENT_IRRADIANCE_VOLUME
 
-fn texel_fetch(st: vec2<i32>) -> vec4<f32> {
-    return textureLoad(irradiance_volume_texture, st, 0);
+fn voxelgi_fetch_and_decode(st: vec2<i32>) -> vec3<f32> {
+    let data = textureLoad(irradiance_volume_texture, st, 0);
+    return data.rgb * exp2(data.a * 255.0 - 128.0);
 }
 
-fn to_blender_coords(p: vec3<f32>) -> vec3<f32> {
-    return vec3(p.x, -p.z, p.y);
-}
-
-fn eevee_irradiance_decode(data: vec4<f32>) -> vec3<f32> {
-    let fexp = data.a * 255.0 - 128.0;
-    return data.rgb * exp2(fexp);
-}
-
-fn eevee_load_irradiance_cell(cell: i32, N: vec3<f32>) -> IrradianceData {
+fn voxelgi_load_irradiance_cell(cell: i32, N: vec3<f32>) -> mat3x3<f32> {
     var cell_co = vec2<i32>(3, 2);
     let cell_per_row = i32(textureDimensions(irradiance_volume_texture, 0).x) / cell_co.x;
     cell_co.x *= cell % cell_per_row;
@@ -178,49 +170,18 @@ fn eevee_load_irradiance_cell(cell: i32, N: vec3<f32>) -> IrradianceData {
 
     let is_negative = vec3<i32>(step(vec3<f32>(0.0), -N));
 
-    var ir: IrradianceData;
-    ir.cubesides[0] = eevee_irradiance_decode(texel_fetch(cell_co + vec2(0, is_negative.x)));
-    ir.cubesides[1] = eevee_irradiance_decode(texel_fetch(cell_co + vec2(1, is_negative.y)));
-    ir.cubesides[2] = eevee_irradiance_decode(texel_fetch(cell_co + vec2(2, is_negative.z)));
-
-    return ir;
+    return mat3x3<f32>(
+        voxelgi_fetch_and_decode(cell_co + vec2(0, is_negative.x)),
+        voxelgi_fetch_and_decode(cell_co + vec2(1, is_negative.y)),
+        voxelgi_fetch_and_decode(cell_co + vec2(2, is_negative.z)));
 }
 
-fn eevee_compute_irradiance(N: vec3<f32>, cubesides: array<vec3<f32>, 3>) -> vec3<f32> {
-    var irradiance = vec3(0.0);
-
-    let n_squared = N * N;
-
-    irradiance += n_squared.x * cubesides[0];
-    irradiance += n_squared.y * cubesides[1];
-    irradiance += n_squared.z * cubesides[2];
-
-    return irradiance;
-}
-
-fn eevee_irradiance_from_cell_get(cell: i32, ir_dir: vec3<f32>) -> vec3<f32> {
-    let ir_data = eevee_load_irradiance_cell(cell, ir_dir);
-    return eevee_compute_irradiance(ir_dir, ir_data.cubesides);
-}
-
-fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) -> SplitSum {
-    let P = to_blender_coords(p);
+fn voxelgi_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) -> SplitSum {
+    let P = vec3(p.x, -p.z, p.y);   // FIXME: Don't do this.
     let N = normalize(n);
     let R = normalize(r);
 
-    /*
-    let corner = irradiance_volume_descriptor.metadata.transform[3].xyz;
-
-    // FIXME: This seems wrong for non-axis-aligned irradiance volumes...
-    let increment = vec3(
-        irradiance_volume_descriptor.metadata.transform[0].x,
-        irradiance_volume_descriptor.metadata.transform[1].y,
-        irradiance_volume_descriptor.metadata.transform[2].z,
-    );
-    */
-
     let localpos = (irradiance_volume_descriptor.metadata.inverse_transform * vec4(P, 1.0)).xyz;
-    //var localpos = (P - corner) / increment;
     let localpos_floored = floor(localpos);
     let trilinear_weight = fract(localpos);
 
@@ -240,8 +201,8 @@ fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) -> S
             irradiance_volume_descriptor.metadata.resolution.z *
             (icell_cos.y + irradiance_volume_descriptor.metadata.resolution.y * icell_cos.x);
 
-        let irradiance = eevee_irradiance_from_cell_get(cell, N);
-        let radiance = eevee_irradiance_from_cell_get(cell, R);
+        let irradiance = voxelgi_load_irradiance_cell(cell, N) * (N * N);
+        let radiance = voxelgi_load_irradiance_cell(cell, R) * (R * R);
 
         let ws_cell_location =
             (irradiance_volume_descriptor.metadata.transform * vec4(cell_cos, 1.0)).xyz;
@@ -250,14 +211,9 @@ fn eevee_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) -> S
         let ws_dist_point_to_cell = length(ws_point_to_cell);
         let ws_light = ws_point_to_cell / ws_dist_point_to_cell;
 
-        var weight = clamp(dot(ws_light, N), 0.0, 1.0);
-
-        weight += 1.0;
-
+        var weight = clamp(dot(ws_light, N), 0.0, 1.0) + 1.0;
         let trilinear = mix(1.0 - trilinear_weight, trilinear_weight, vec3<f32>(offset));
-        weight *= trilinear.x * trilinear.y * trilinear.z;
-
-        weight = max(0.00001, weight);
+        weight = max(0.00001, weight * trilinear.x * trilinear.y * trilinear.z);
 
         weight_accum += weight;
         irradiance_accum += irradiance * weight;
@@ -281,7 +237,7 @@ fn irradiance_volume_light(
     R: vec3<f32>,
     F0: vec3<f32>,
 ) -> EnvironmentMapLight {
-    let split_sum = eevee_sample_irradiance_volume(P, N, R);
+    let split_sum = voxelgi_sample_irradiance_volume(P, N, R);
     return compute_ibl(
         split_sum.irradiance, split_sum.radiance, roughness, diffuse_color, NdotV, f_ab, F0);
 }
