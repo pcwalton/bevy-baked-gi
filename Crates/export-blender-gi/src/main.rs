@@ -22,7 +22,7 @@ use bevy_baked_gi::Manifest;
 use blend::{Blend, Instance};
 use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 use clap::Parser;
-use glam::{ivec2, uvec2, vec3, IVec2, IVec3, Mat4, UVec2, Vec3, Vec3Swizzles};
+use glam::{ivec2, uvec2, vec3, IVec2, IVec3, Mat4, UVec2, Vec3, Vec3Swizzles, vec4};
 use ibllib_bindings::{
     IBLLib_OutputFormat_R32G32B32A32_SFLOAT, IBLLib_OutputFormat_R8G8B8A8_UNORM,
 };
@@ -65,6 +65,12 @@ static CUBEMAP_FACES: [(usize, CubeFaceRotation); 6] = [
     (2, CubeFaceRotation::Rotate180),
     (3, CubeFaceRotation::None),
 ];
+
+static BEVY_AXES_TO_BLENDER_AXES: Mat4 = Mat4::from_cols(
+    vec4(1.0, 0.0, 0.0, 0.0),
+    vec4(0.0, 0.0, -1.0, 0.0),
+    vec4(0.0, 1.0, 0.0, 0.0),
+    vec4(0.0, 0.0, 0.0, 1.0));
 
 /// Exports global illumination from a Blender file into a Bevy scene.
 #[derive(Parser, Resource, Clone)]
@@ -264,7 +270,7 @@ fn extract_irradiance_volumes(
             continue;
         }
 
-        let transform = Mat4::from_cols(
+        let transform = BEVY_AXES_TO_BLENDER_AXES * Mat4::from_cols(
             Vec3::from_slice(&grid_data.get_f32_vec("increment_x")).extend(0.0),
             Vec3::from_slice(&grid_data.get_f32_vec("increment_y")).extend(0.0),
             Vec3::from_slice(&grid_data.get_f32_vec("increment_z")).extend(0.0),

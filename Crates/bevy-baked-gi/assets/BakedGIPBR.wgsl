@@ -177,8 +177,7 @@ fn voxelgi_load_irradiance_cell(cell_index: i32, N: vec3<f32>) -> mat3x3<f32> {
         voxelgi_fetch_and_decode(cell_origin + vec2(2, is_negative.z)));
 }
 
-fn voxelgi_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) -> SplitSum {
-    let P = vec3(p.x, -p.z, p.y);   // FIXME: Don't do this.
+fn voxelgi_sample_irradiance_volume(P: vec3<f32>, n: vec3<f32>, r: vec3<f32>) -> SplitSum {
     let N = normalize(n);
     let R = normalize(r);
 
@@ -205,10 +204,8 @@ fn voxelgi_sample_irradiance_volume(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>) ->
         let irradiance = voxelgi_load_irradiance_cell(cell_index, N) * (N * N);
         let radiance = voxelgi_load_irradiance_cell(cell_index, R) * (R * R);
 
-        let world_space_cell_center = (transform * vec4(cell_center, 1.0)).xyz;
-
-        // FIXME: I think this is wrong until we stop switching P's axes.
-        var weight = clamp(dot(normalize(world_space_cell_center - P), N), 0.0, 1.0) + 1.0;
+        var weight = clamp(
+            dot(normalize((transform * vec4(cell_center, 1.0)).xyz - P), N), 0.0, 1.0) + 1.0;
         let trilinear = mix(1.0 - trilinear_weight, trilinear_weight, vec3<f32>(offset));
         weight = max(0.00001, weight * trilinear.x * trilinear.y * trilinear.z);
 
