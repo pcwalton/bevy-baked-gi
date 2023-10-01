@@ -18,6 +18,7 @@ thiserror = "1"
 bevy_egui = "0.21"
 clap = "4"
 egui = "0.22"
+pathdiff = "0.2"
 ron = "0.8"
 walkdir = "2"
 

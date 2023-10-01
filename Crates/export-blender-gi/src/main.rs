@@ -12,17 +12,16 @@ use bevy::prelude::{
 };
 use bevy::reflect::{ReflectSerialize, TypePath, TypeUuid};
 use bevy::render::view::ViewPlugin;
-use bevy::scene::{self, DynamicScene};
+use bevy::scene::DynamicScene;
 use bevy::MinimalPlugins;
 use bevy_baked_gi::irradiance_volumes::{
     IrradianceVolume, IrradianceVolumeMetadata, IRRADIANCE_GRID_BYTES_PER_CELL,
 };
 use bevy_baked_gi::reflection_probes::ReflectionProbe;
-use bevy_baked_gi::Manifest;
 use blend::{Blend, Instance};
 use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
 use clap::Parser;
-use glam::{ivec2, uvec2, vec3, IVec2, IVec3, Mat4, UVec2, Vec3, Vec3Swizzles, vec4};
+use glam::{ivec2, uvec2, vec3, vec4, IVec2, IVec3, Mat4, UVec2, Vec3, Vec3Swizzles};
 use ibllib_bindings::{
     IBLLib_OutputFormat_R32G32B32A32_SFLOAT, IBLLib_OutputFormat_R8G8B8A8_UNORM,
 };
@@ -70,7 +69,8 @@ static BEVY_AXES_TO_BLENDER_AXES: Mat4 = Mat4::from_cols(
     vec4(1.0, 0.0, 0.0, 0.0),
     vec4(0.0, 0.0, -1.0, 0.0),
     vec4(0.0, 1.0, 0.0, 0.0),
-    vec4(0.0, 0.0, 0.0, 1.0));
+    vec4(0.0, 0.0, 0.0, 1.0),
+);
 
 /// Exports global illumination from a Blender file into a Bevy scene.
 #[derive(Parser, Resource, Clone)]
@@ -171,11 +171,8 @@ fn go(
     let mut world = World::new();
     world.insert_resource((*type_registry).clone());
 
-    let mut manifest = Manifest::new();
-
     extract_irradiance_volumes(
         &mut world,
-        &mut manifest,
         &mut asset_server,
         &light_cache_data,
         &output_dir,
@@ -185,7 +182,6 @@ fn go(
 
     extract_reflection_probes(
         &mut world,
-        &mut manifest,
         &mut asset_server,
         &light_cache_data,
         &output_dir,
@@ -202,18 +198,6 @@ fn go(
     fs::write(scene_output_path, serialized_scene.as_bytes()).unwrap_or_else(|err| {
         die(format!(
             "Failed to write the serialized Bevy scene: {:?}",
-            err
-        ))
-    });
-
-    // Write manifest.
-    let manifest_output_path =
-        output_dir.join(format!("{}.manifest.ron", filename.to_string_lossy()));
-    let serialized_manifest = scene::serialize_ron(manifest)
-        .unwrap_or_else(|err| die(format!("Failed to serialize the manifest: {:?}", err)));
-    fs::write(manifest_output_path, serialized_manifest.as_bytes()).unwrap_or_else(|err| {
-        die(format!(
-            "Failed to write the serialized manifest: {:?}",
             err
         ))
     });
@@ -247,7 +231,6 @@ impl Args {
 
 fn extract_irradiance_volumes(
     world: &mut World,
-    manifest: &mut Manifest,
     asset_server: &mut AssetServer,
     light_cache_data: &Instance,
     output_dir: &Path,
@@ -270,12 +253,13 @@ fn extract_irradiance_volumes(
             continue;
         }
 
-        let transform = BEVY_AXES_TO_BLENDER_AXES * Mat4::from_cols(
-            Vec3::from_slice(&grid_data.get_f32_vec("increment_x")).extend(0.0),
-            Vec3::from_slice(&grid_data.get_f32_vec("increment_y")).extend(0.0),
-            Vec3::from_slice(&grid_data.get_f32_vec("increment_z")).extend(0.0),
-            Vec3::from_slice(&grid_data.get_f32_vec("corner")).extend(1.0),
-        );
+        let transform = BEVY_AXES_TO_BLENDER_AXES
+            * Mat4::from_cols(
+                Vec3::from_slice(&grid_data.get_f32_vec("increment_x")).extend(0.0),
+                Vec3::from_slice(&grid_data.get_f32_vec("increment_y")).extend(0.0),
+                Vec3::from_slice(&grid_data.get_f32_vec("increment_z")).extend(0.0),
+                Vec3::from_slice(&grid_data.get_f32_vec("corner")).extend(1.0),
+            );
 
         let meta = IrradianceVolumeMetadata {
             transform,
@@ -323,8 +307,7 @@ fn extract_irradiance_volumes(
         )
         .unwrap_or_else(|err| die(format!("{:?}", err)));
 
-        let irradiance_volume_image =
-            add_to_manifest(manifest, &irradiance_volume_path, assets_dir, asset_server);
+        let irradiance_volume_image = load_asset(&irradiance_volume_path, assets_dir, asset_server);
 
         let irradiance_volume = IrradianceVolume {
             meta,
@@ -352,7 +335,6 @@ fn get_texel(buffer: &[u8], p: IVec2, stride: usize) -> [u8; 4] {
 
 fn extract_reflection_probes(
     world: &mut World,
-    manifest: &mut Manifest,
     asset_server: &mut AssetServer,
     light_cache_data: &Instance,
     output_dir: &Path,
@@ -375,7 +357,6 @@ fn extract_reflection_probes(
     for (cubemap_index, cube_data) in cube_data.iter().enumerate() {
         extract_single_reflection_probe(
             world,
-            manifest,
             asset_server,
             cube_data,
             cubemap_index,
@@ -390,7 +371,6 @@ fn extract_reflection_probes(
 
 fn extract_single_reflection_probe(
     world: &mut World,
-    manifest: &mut Manifest,
     asset_server: &mut AssetServer,
     cube_data: &Instance,
     cubemap_index: usize,
@@ -480,8 +460,8 @@ fn extract_single_reflection_probe(
         filename,
     );
 
-    let diffuse_map = add_to_manifest(manifest, &cubemap_paths.diffuse, assets_dir, asset_server);
-    let specular_map = add_to_manifest(manifest, &cubemap_paths.specular, assets_dir, asset_server);
+    let diffuse_map = load_asset(&cubemap_paths.diffuse, assets_dir, asset_server);
+    let specular_map = load_asset(&cubemap_paths.specular, assets_dir, asset_server);
 
     world
         .spawn(ReflectionProbe {
@@ -669,19 +649,12 @@ path instead",
     fs::canonicalize(path).unwrap()
 }
 
-fn add_to_manifest<T>(
-    manifest: &mut Manifest,
-    path: &Path,
-    assets_dir: &Path,
-    asset_server: &mut AssetServer,
-) -> Handle<T>
+fn load_asset<T>(path: &Path, assets_dir: &Path, asset_server: &mut AssetServer) -> Handle<T>
 where
     T: TypePath + TypeUuid + Send + Sync,
 {
     let asset_dir_relative_path = asset_dir_relative(path, assets_dir);
-    let handle = asset_server.load::<T, _>(&*asset_dir_relative_path);
-    manifest.insert(handle.id(), asset_dir_relative_path);
-    handle
+    asset_server.load::<T, _>(&*asset_dir_relative_path)
 }
 
 fn to_transform_matrix(matrix: &Mat4) -> Transform {

@@ -17,15 +17,15 @@ use bevy::prelude::{
 use bevy::reflect::ReflectRef;
 use bevy::scene::{DynamicSceneBundle, SceneBundle, SceneInstance};
 use bevy::DefaultPlugins;
-use bevy_baked_gi::{BakedGiPlugin, Manifest};
+use bevy_baked_gi::BakedGiPlugin;
 use bevy_egui::EguiPlugin;
 use bevy_view_controls_egui::{ControllableCamera, ViewControlsPlugin};
 use clap::Parser;
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::fs::File;
+use std::fs;
 use std::mem;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 const FERRIS_ROTATION_SPEED: f32 = 0.01;
@@ -40,12 +40,6 @@ struct Args {
     /// merged together and displayed at once.
     #[arg()]
     scene: Vec<PathBuf>,
-
-    /// The path to the manifest emitted by `export-blender-gi`.
-    ///
-    /// All assets within the manifest will be loaded.
-    #[arg(short, long)]
-    manifest: Vec<PathBuf>,
 
     /// The directory that all assets are relative to.
     ///
@@ -91,23 +85,16 @@ fn main() {
 
 fn setup(
     mut commands: Commands,
-    mut asset_server: ResMut<AssetServer>,
+    asset_server: ResMut<AssetServer>,
     args: Res<Args>,
     mut asset_ids: ResMut<AssetIds>,
 ) {
-    for maybe_dirent in WalkDir::new(args.assets_dir()) {
+    let assets_dir = args.assets_dir();
+    for maybe_dirent in WalkDir::new(&*assets_dir) {
         let Ok(dirent) = maybe_dirent else { continue };
-        let asset_path = PathBuf::from_iter(dirent.path().components().skip(1));
+        let Some(asset_path) = pathdiff::diff_paths(dirent.path(), &assets_dir) else { continue };
         let handle_id = HandleId::AssetPathId(AssetPath::new(asset_path.clone(), None).into());
         asset_ids.insert(handle_id, asset_path);
-    }
-
-    for manifest in &args.manifest {
-        let manifest: Manifest = ron::de::from_reader(&File::open(manifest).unwrap()).unwrap();
-        // FIXME: Don't forget.
-        let handles = manifest.load_all(&mut asset_server);
-        println!("{:#?}", handles);
-        mem::forget(handles);
     }
 
     commands
@@ -133,6 +120,7 @@ fn setup(
             .iter()
             .any(|extension| scene_path.extension() == Some(OsStr::new(extension)))
         {
+            println!("trying to load {}", scene_path.display());
             commands.spawn(SceneBundle {
                 scene: asset_server.load(format!("{}#Scene0", scene_path.display())),
                 transform: Transform::IDENTITY,
@@ -181,10 +169,17 @@ fn apply_shadows_to_lights(
 
 impl Args {
     fn assets_dir(&self) -> PathBuf {
-        match self.assets_dir {
-            Some(ref assets_dir) => (*assets_dir).clone(),
+        let relative_assets_dir = match self.assets_dir {
+            Some(ref assets_dir) => assets_dir,
             // FIXME: Should be the scene path root.
-            None => PathBuf::from("Assets"),
+            None => match self.scene.get(0).and_then(|path| path.parent()) {
+                Some(assets_dir) => assets_dir,
+                None => Path::new("Assets"),
+            },
+        };
+        match fs::canonicalize(relative_assets_dir) {
+            Err(_) => PathBuf::from("Assets"),
+            Ok(assets_dir) => assets_dir,
         }
     }
 }
@@ -257,7 +252,10 @@ fn get_handle_ids_from_new_entities(
                 let asset_path = match asset_ids.get(&handle_id) {
                     Some(asset_path) => (*asset_path).clone(),
                     None => {
-                        warn!("Asset with ID {:?} not found in assets directory", handle_id);
+                        warn!(
+                            "Asset with ID {:?} not found in assets directory",
+                            handle_id
+                        );
                         continue;
                     }
                 };

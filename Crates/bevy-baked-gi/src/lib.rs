@@ -13,7 +13,7 @@ use crate::lightmaps::{
 };
 use crate::reflection_probes::AppliedReflectionProbe;
 use arrayvec::ArrayVec;
-use bevy::asset::{load_internal_asset, HandleId};
+use bevy::asset::load_internal_asset;
 use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d, Transparent3d};
 use bevy::core_pipeline::experimental::taa::TemporalAntiAliasSettings;
 use bevy::core_pipeline::prepass::NormalPrepass;
@@ -30,11 +30,10 @@ use bevy::pbr::{
     SetMeshViewBindGroup, Shadow, PBR_PREPASS_SHADER_HANDLE,
 };
 use bevy::prelude::{
-    error, info, warn, AddAsset, AlphaMode, App, AssetEvent, AssetServer, Assets, Children,
-    Commands, Component, Deref, DerefMut, Entity, EnvironmentMapLight, EventReader, FromWorld,
-    Handle, HandleUntyped, Image, IntoSystemConfigs, Material, Mesh, Msaa, Name, Plugin,
-    PostUpdate, Query, Rect, Res, ResMut, Resource, Shader, StandardMaterial, Update, Vec2, With,
-    Without, World,
+    error, info, warn, AddAsset, AlphaMode, App, AssetEvent, Assets, Children, Commands, Component,
+    Entity, EnvironmentMapLight, EventReader, FromWorld, Handle, HandleUntyped, Image,
+    IntoSystemConfigs, Material, Mesh, Msaa, Name, Plugin, PostUpdate, Query, Rect, Res, ResMut,
+    Resource, Shader, StandardMaterial, Update, Vec2, With, Without, World,
 };
 use bevy::reflect::{Reflect, TypeUuid};
 use bevy::render::extract_component::ExtractComponentPlugin;
@@ -57,9 +56,7 @@ use bevy::render::{ExtractSchedule, Render, RenderApp, RenderSet};
 use bevy::scene::Scene;
 use bevy::utils::HashMap;
 use reflection_probes::ReflectionProbe;
-use serde::{Deserialize, Serialize};
 use serde_json::{Error as SerdeJsonError, Value};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use thiserror::Error as Thiserror;
 
@@ -203,23 +200,6 @@ weren't all present and numeric"
     )]
     MalformedLightmapCoords,
 }
-
-/// Maps handle IDs to paths of assets within the assets directory.
-///
-/// `export-blender-gi` exports a serialized instance of this type alongside the
-/// scene in RON format.  Bevy `.scn.ron` files refer to assets by their
-/// [HandleId]s, not by their pathnames. Consequently, in order to load the
-/// scene containing the baked global illumination data at runtime, this table
-/// mapping handle IDs to paths within the assets folder is necessary. The
-/// manifest is written to a file in RON format with the extension
-/// `.manifest.ron`.
-///
-/// Typically, an application loading a scene exported from Blender via
-/// `export-blender-gi` will load the manifest from the `.manifest.ron` file and
-/// direct the [AssetServer] to load every asset in this table with the
-/// [Manifest::load_all] method.
-#[derive(Serialize, Deserialize, Deref, DerefMut)]
-pub struct Manifest(pub BTreeMap<HandleId, PathBuf>);
 
 /// Extension methods for axis-aligned bounding boxes.
 trait AabbExt {
@@ -857,31 +837,6 @@ impl GltfGiSettings {
         }
 
         Ok(())
-    }
-}
-
-impl Manifest {
-    /// Creates a new empty manifest.
-    pub fn new() -> Manifest {
-        Manifest(BTreeMap::new())
-    }
-
-    /// Queues all the assets in the manifest for loading and returns a map from
-    /// the handle IDs to the actual loaded handles.
-    pub fn load_all(&self, asset_server: &mut AssetServer) -> HashMap<HandleId, HandleUntyped> {
-        self.iter()
-            .map(|(handle_id, path)| {
-                let handle = asset_server.load_untyped(&**path);
-                debug_assert_eq!(handle.id(), *handle_id);
-                (*handle_id, handle)
-            })
-            .collect()
-    }
-}
-
-impl Default for Manifest {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
