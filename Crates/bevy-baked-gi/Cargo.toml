@@ -14,6 +14,9 @@ serde = "1"
 serde_json = "1"
 thiserror = "1"
 
+#[dependencies.bevy]
+#path = "../../../bevy"
+
 [dev-dependencies]
 bevy_egui = "0.21"
 clap = "4"

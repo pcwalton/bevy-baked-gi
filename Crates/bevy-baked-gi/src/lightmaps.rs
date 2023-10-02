@@ -59,7 +59,7 @@ pub struct LightmapSettings {
     ///
     /// Higher values are brighter.
     ///
-    /// The default value is 0.00075.
+    /// The default value is 0.005.
     pub exposure: f32,
 }
 
@@ -279,7 +279,7 @@ impl Default for LightmapSettings {
     fn default() -> Self {
         LightmapSettings {
             uv_rect: vec4(0.0, 0.0, 1.0, 1.0),
-            exposure: 0.00075,
+            exposure: 0.005,
         }
     }
 }

@@ -18,8 +18,6 @@ use bevy::reflect::ReflectRef;
 use bevy::scene::{DynamicSceneBundle, SceneBundle, SceneInstance};
 use bevy::DefaultPlugins;
 use bevy_baked_gi::BakedGiPlugin;
-use bevy_egui::EguiPlugin;
-use bevy_view_controls_egui::{ControllableCamera, ViewControlsPlugin};
 use clap::Parser;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -64,12 +62,8 @@ fn main() {
             asset_folder: args.assets_dir().to_string_lossy().into_owned(),
             watch_for_changes: None,
         }))
-        .add_plugins(EguiPlugin)
-        .add_plugins(ViewControlsPlugin)
         .add_plugins(BakedGiPlugin::default())
         .add_systems(Startup, setup)
-        .add_systems(Startup, bevy_view_controls_egui::simple_setup)
-        .add_systems(Update, bevy_view_controls_egui::simple_view_controls)
         .add_systems(Update, rotate_ferris)
         .add_systems(Update, apply_shadows_to_lights)
         .add_systems(Update, get_handle_ids_from_new_entities)
@@ -99,17 +93,13 @@ fn setup(
 
     commands
         .spawn(Camera3dBundle {
-            transform: Transform::from_xyz(0.0, 0.0, 3.0).looking_at(Vec3::ZERO, Vec3::Y),
+            transform: Transform::from_xyz(80.0, 20.0, -3.0).looking_at(Vec3::ZERO, Vec3::Y),
             camera: Camera {
                 hdr: true,
                 ..Camera::default()
             },
             tonemapping: Tonemapping::TonyMcMapface,
             ..Camera3dBundle::default()
-        })
-        .insert(ControllableCamera {
-            target: Vec3A::ZERO,
-            ..ControllableCamera::default()
         })
         .insert(ScreenSpaceAmbientOcclusionBundle::default())
         .insert(TemporalAntiAliasBundle::default())
@@ -135,14 +125,14 @@ fn setup(
         };
     }
 
-    // TODO: Make this configurable.
+    /*// TODO: Make this configurable.
     commands
         .spawn(SceneBundle {
             scene: asset_server.load("Ferris.glb#Scene0"),
             transform: Transform::from_scale(Vec3::splat(12.5)),
             ..SceneBundle::default()
         })
-        .insert(Name::new("Ferris"));
+        .insert(Name::new("Ferris"));*/
 }
 
 fn rotate_ferris(mut query: Query<(&Name, &mut Transform)>) {
