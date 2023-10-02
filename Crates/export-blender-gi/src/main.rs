@@ -265,7 +265,6 @@ fn extract_irradiance_volumes(
             transform,
             inverse_transform: transform.inverse(),
             resolution,
-            level_bias: grid_data.get_f32("level_bias"),
         };
 
         let offset = grid_data.get_i32("offset");

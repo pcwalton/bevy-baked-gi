@@ -54,9 +54,6 @@ pub struct IrradianceVolumeMetadata {
 
     /// The size of the voxel grid, in voxels.
     pub resolution: IVec3,
-
-    /// The LOD bias.
-    pub level_bias: f32,
 }
 
 /// Stores information about the irradiance volume on this entity so that the

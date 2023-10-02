@@ -91,7 +91,6 @@ struct IrradianceVolumeMetadata {
     transform: mat4x4<f32>,
     inverse_transform: mat4x4<f32>,
     resolution: vec3<i32>,
-    level_bias: f32,
 }
 
 struct IrradianceVolumeDescriptor {
