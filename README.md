@@ -30,7 +30,7 @@ The following tools may be useful for baking lightmaps.
 `bevy-baked-gi` provides a built-in asset loader for [glTF] scenes with a
 `.gi.gltf` or `.gi.glb` extension that correctly handles global illumination
 baked with The Lightmapper. Lightmaps built with that addon and exported to glTF
-with a `.gl.glb` extension are automatically detected and applied to the scene.
+with a `.gi.glb` extension are automatically detected and applied to the scene.
 
 You may also use [Cycles' built-in baking], as long as you place the lightmap
 UVs into the second UV channel (UV1, `TEXCOORD1`) and add the relative path to
