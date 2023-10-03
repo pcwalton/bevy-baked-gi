@@ -17,7 +17,7 @@ use bevy::render::render_resource::AsBindGroup;
 /// Any mesh with a GI PBR material located within the boundaries of a
 /// reflection probe uses the diffuse and specular cubemaps stored here for
 /// diffuse and specular reflections, respectively. These reflections reflect
-/// static geometry only, so they won't reflect objects that move. The benefit
+/// static geometry only, so they won't update as the scene changes. The benefit
 /// is that, because these reflections are precomputed, they're cheap to render
 /// with at runtime.
 ///

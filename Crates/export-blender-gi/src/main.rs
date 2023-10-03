@@ -1,5 +1,7 @@
 // bevy-baked-gi/Crates/export-blender-gi/src/main.rs
 
+//! Exports global illumination from a Blender file into a Bevy scene.
+
 use crate::ibllib_bindings::{
     IBLLib_Distribution_GGX, IBLLib_Distribution_Lambertian, IBLLib_Result_Success,
 };
@@ -80,18 +82,30 @@ struct Args {
     #[arg()]
     input: PathBuf,
 
-    /// FIXME: This should be separate output directories for each type of asset.
-    #[arg(short, long)]
-    out_dir: Option<PathBuf>,
-
-    /// The path to the assets directory for the Bevy project that this global illumination will be
-    /// added to.
+    /// The default path to the assets directory.
+    ///
+    /// This is the path to the assets directory for the Bevy project that the
+    /// assets needed for global illumination will be added to, if not otherwise
+    /// specified by a more specific directory for that asset (e.g. by the
+    /// `reflection-probes-dir` option).
     ///
     /// This is needed in order for `export-blender-gi` to refer to each asset
     /// with the correct [HandleId], since handle IDs are hashed versions of
     /// asset paths, and asset paths are relative to the assets directory.
     #[arg(short, long)]
     assets_dir: Option<PathBuf>,
+
+    /// The path to the directory where Bevy scenes will be stored.
+    #[arg(long)]
+    scenes_dir: Option<PathBuf>,
+
+    /// The path to the directory where irradiance volume textures will be stored.
+    #[arg(long)]
+    irradiance_volumes_dir: Option<PathBuf>,
+
+    /// The path to the directory where reflection probe cubemaps will be stored.
+    #[arg(long)]
+    reflection_probes_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -149,7 +163,7 @@ fn go(
     let mut blend_file = File::open(&args.input)
         .unwrap_or_else(|err| die(format!("Failed to open the Blender file: {:?}", err)));
 
-    let (output_dir, assets_dir) = (args.output_dir(), args.assets_dir());
+    let assets_dir = args.assets_dir();
     let filename = args.input.file_stem().expect("No file stem found");
 
     let mut blend_data = vec![];
@@ -175,7 +189,7 @@ fn go(
         &mut world,
         &mut asset_server,
         &light_cache_data,
-        &output_dir,
+        &args.irradiance_volumes_dir(),
         &assets_dir,
         filename,
     );
@@ -184,14 +198,16 @@ fn go(
         &mut world,
         &mut asset_server,
         &light_cache_data,
-        &output_dir,
+        &args.reflection_probes_dir(),
         &assets_dir,
         filename,
     );
 
     // Write scene.
     let bevy_scene = DynamicScene::from_world(&world);
-    let scene_output_path = output_dir.join(format!("{}.scn.ron", filename.to_string_lossy()));
+    let scene_output_path = args
+        .scenes_dir()
+        .join(format!("{}.scn.ron", filename.to_string_lossy()));
     let serialized_scene = bevy_scene
         .serialize_ron(world.resource::<AppTypeRegistry>())
         .unwrap_or_else(|err| die(format!("Failed to serialize the Bevy scene: {:?}", err)));
@@ -211,9 +227,9 @@ fn die(message: impl AsRef<str>) -> ! {
 }
 
 impl Args {
-    fn output_dir(&self) -> PathBuf {
-        if let Some(ref out_dir) = self.out_dir {
-            return out_dir.to_owned();
+    fn assets_dir(&self) -> PathBuf {
+        if let Some(ref assets_dir) = self.assets_dir {
+            return assets_dir.to_owned();
         }
         if let Ok(current_dir) = env::current_dir() {
             return current_dir;
@@ -224,8 +240,20 @@ impl Args {
         die("Couldn't find a suitable output directory");
     }
 
-    fn assets_dir(&self) -> PathBuf {
-        self.assets_dir.clone().unwrap_or_else(|| self.output_dir())
+    fn scenes_dir(&self) -> PathBuf {
+        self.scenes_dir.clone().unwrap_or_else(|| self.assets_dir())
+    }
+
+    fn irradiance_volumes_dir(&self) -> PathBuf {
+        self.irradiance_volumes_dir
+            .clone()
+            .unwrap_or_else(|| self.assets_dir())
+    }
+
+    fn reflection_probes_dir(&self) -> PathBuf {
+        self.reflection_probes_dir
+            .clone()
+            .unwrap_or_else(|| self.assets_dir())
     }
 }
 
@@ -233,7 +261,7 @@ fn extract_irradiance_volumes(
     world: &mut World,
     asset_server: &mut AssetServer,
     light_cache_data: &Instance,
-    output_dir: &Path,
+    irradiance_volumes_dir: &Path,
     assets_dir: &Path,
     filename: &OsStr,
 ) {
@@ -300,7 +328,7 @@ fn extract_irradiance_volumes(
 
         let irradiance_volume_path = update_irradiance_grid(
             &grid_sample_data,
-            output_dir,
+            irradiance_volumes_dir,
             filename,
             irradiance_volume_index,
         )
@@ -336,7 +364,7 @@ fn extract_reflection_probes(
     world: &mut World,
     asset_server: &mut AssetServer,
     light_cache_data: &Instance,
-    output_dir: &Path,
+    reflection_probes_dir: &Path,
     assets_dir: &Path,
     filename: &OsStr,
 ) {
@@ -361,7 +389,7 @@ fn extract_reflection_probes(
             cubemap_index,
             cube_dimensions,
             &cube_texture_data,
-            output_dir,
+            reflection_probes_dir,
             assets_dir,
             filename,
         );
@@ -375,7 +403,7 @@ fn extract_single_reflection_probe(
     cubemap_index: usize,
     cube_dimensions: IVec2,
     cube_texture_data: &[u8],
-    output_dir: &Path,
+    reflection_probes_dir: &Path,
     assets_dir: &Path,
     filename: &OsStr,
 ) {
@@ -455,7 +483,7 @@ fn extract_single_reflection_probe(
         height,
         raw_cubemap_path,
         lut_path,
-        output_dir,
+        reflection_probes_dir,
         filename,
     );
 
@@ -479,10 +507,10 @@ fn sample_cubemap(
     height: u32,
     raw_cubemap_path: PathBuf,
     lut_path: PathBuf,
-    output_dir: &Path,
+    reflection_probes_dir: &Path,
     filename: &OsStr,
 ) -> CubemapPaths {
-    let output_path = output_dir.to_owned();
+    let output_path = reflection_probes_dir.to_owned();
     let diffuse_output_path = output_path.join(format!(
         "{}.diffuse.{:0>3}.ktx2",
         filename.to_string_lossy(),
@@ -665,7 +693,7 @@ fn to_transform_matrix(matrix: &Mat4) -> Transform {
 
 pub fn update_irradiance_grid(
     grid_sample_data: &[u8],
-    output_dir: &Path,
+    irradiance_volumes_dir: &Path,
     filename: &OsStr,
     irradiance_volume_index: usize,
 ) -> AnyhowResult<PathBuf> {
@@ -707,7 +735,7 @@ pub fn update_irradiance_grid(
         }
     }
 
-    let output_path = output_dir.join(format!(
+    let output_path = irradiance_volumes_dir.join(format!(
         "{}.voxelgi.{:0>3}.ktx2",
         filename.to_string_lossy(),
         irradiance_volume_index
