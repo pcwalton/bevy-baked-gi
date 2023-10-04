@@ -114,7 +114,7 @@ pub fn apply_irradiance_volumes(
             // FIXME: Cache the matrix inverse operation…
             let irradiance_volume_transform = irradiance_volume_transform.compute_matrix();
             let point = Vec3A::from(irradiance_volume_transform.inverse() * center.extend(1.0));
-            if Aabb::centered_unit_cube().contains_point(point) {
+            //if Aabb::centered_unit_cube().contains_point(point) {
                 commands.entity(target).insert(AppliedIrradianceVolume {
                     irradiance_volume_descriptor: IrradianceVolumeDescriptor {
                         meta: irradiance_volume.meta.clone(),
@@ -123,7 +123,7 @@ pub fn apply_irradiance_volumes(
                     irradiance_volume_texture: Some(irradiance_volume.image.clone()),
                 });
                 continue 'outer;
-            }
+            //}
         }
 
         commands.entity(target).remove::<AppliedIrradianceVolume>();

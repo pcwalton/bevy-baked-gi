@@ -180,9 +180,8 @@ fn voxelgi_load_irradiance_cell(cell_index: i32, N: vec3<f32>) -> mat3x3<f32> {
         voxelgi_fetch_and_decode(cell_origin + vec2(2, is_negative.z)));
 }
 
-fn voxelgi_sample_irradiance_volume(P: vec3<f32>, n: vec3<f32>, r: vec3<f32>) -> SplitSum {
+fn voxelgi_sample_irradiance_volume(P: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let N = normalize(n);
-    let R = normalize(r);
 
     let resolution = irradiance_volume_descriptor.metadata.resolution;
     let transform = irradiance_volume_descriptor.metadata.transform;
@@ -205,7 +204,6 @@ fn voxelgi_sample_irradiance_volume(P: vec3<f32>, n: vec3<f32>, r: vec3<f32>) ->
             resolution.z * (i32(cell_center.y) + resolution.y * i32(cell_center.x));
 
         let irradiance = voxelgi_load_irradiance_cell(cell_index, N) * (N * N);
-        let radiance = voxelgi_load_irradiance_cell(cell_index, R) * (R * R);
 
         var weight = clamp(
             dot(normalize((transform * vec4(cell_center, 1.0)).xyz - P), N), 0.0, 1.0) + 1.0;
@@ -214,25 +212,13 @@ fn voxelgi_sample_irradiance_volume(P: vec3<f32>, n: vec3<f32>, r: vec3<f32>) ->
 
         weight_accum += weight;
         irradiance_accum += irradiance * weight;
-        radiance_accum += radiance * weight;
     }
 
-    var out: SplitSum;
-    out.irradiance = irradiance_accum / weight_accum;
-    out.radiance = radiance_accum / weight_accum;
-    return out;
+    return irradiance_accum / weight_accum;
 }
 
-fn irradiance_volume_light(
-    diffuse_color: vec3<f32>,
-    P: vec3<f32>,
-    N: vec3<f32>,
-    R: vec3<f32>,
-) -> vec3<f32> {
-    let split_sum = voxelgi_sample_irradiance_volume(P, N, R);
-    return split_sum.irradiance * diffuse_color;
-    /*return compute_ibl(
-        split_sum.irradiance, split_sum.radiance, roughness, diffuse_color, NdotV, f_ab, F0);*/
+fn irradiance_volume_light(diffuse_color: vec3<f32>, P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
+    return voxelgi_sample_irradiance_volume(P, N) * diffuse_color;
 }
 
 #endif  // FRAGMENT_IRRADIANCE_VOLUME
@@ -358,7 +344,7 @@ fn pbr(
     indirect_light += (environment_light.diffuse * occlusion) + environment_light.specular;
 #else
 #ifdef FRAGMENT_IRRADIANCE_VOLUME
-    let environment_light = irradiance_volume_light(diffuse_color, in.world_position.xyz, in.N, R);
+    let environment_light = irradiance_volume_light(diffuse_color, in.world_position.xyz, in.N);
     indirect_light += environment_light;
 #else
 #ifdef ENVIRONMENT_MAP

@@ -310,17 +310,29 @@ fn extract_irradiance_volumes(
                 src_sample_index / cells_per_row * 2,
             );
 
-            for bevy_offset in [
-                ivec2(0, 0), // Blender +X, Bevy +X
-                ivec2(0, 1), // Blender -X, Bevy -X
-                ivec2(2, 1), // Blender +Y, Bevy -Z
-                ivec2(2, 0), // Blender -Y, Bevy +Z
-                ivec2(1, 0), // Blender +Z, Bevy +Y
-                ivec2(1, 1), // Blender -Z, Bevy -Y
+            for blender_offset in [
+                ivec2(0, 0), // Bevy +X, Blender +X,
+                ivec2(2, 0), // Bevy +Y, Blender +Z
+                ivec2(1, 1), // Bevy +Z, Blender -Y
+                ivec2(0, 1), // Bevy -X, Blender -X
+                ivec2(2, 1), // Bevy -Y, Blender -Z
+                ivec2(1, 0), // Bevy -Z, Blender +Y
             ] {
+                /*
+                let texel: &[u8] = match (blender_offset.x, blender_offset.y) {
+                    (0, 0) => &[255, 0, 0, 128],
+                    (1, 0) => &[0, 255, 0, 128],
+                    (2, 0) => &[0, 0, 255, 128],
+                    (0, 1) => &[255, 255, 0, 128],  // yellow
+                    (1, 1) => &[255, 0, 255, 128],  // pink
+                    (2, 1) => &[0, 255, 255, 128],
+                    _ => unreachable!(),
+                };
+                */
+
                 grid_sample_data.extend_from_slice(&get_texel(
                     &grid_texture_data,
-                    origin + bevy_offset,
+                    origin + blender_offset,
                     grid_stride,
                 ));
             }
@@ -712,58 +724,37 @@ pub fn update_irradiance_grid(
     let sample_count = grid_sample_data.len() / IRRADIANCE_GRID_BYTES_PER_CELL;
 
     // FIXME: Pick this dynamically.
-    let bevy_width = 768;
-    let bevy_cells_per_row = bevy_width as usize / 3;
-    let bevy_height = div_ceil(sample_count as _, bevy_cells_per_row as _) * 2;
+    let dest_width = 768;
+    let dest_cells_per_row = dest_width as usize / 3;
+    let dest_height = div_ceil(sample_count as _, dest_cells_per_row as _) * 2;
 
-    let mut bevy_grid_data =
-        vec![0; bevy_width as usize * bevy_height as usize * IRRADIANCE_GRID_BYTES_PER_SAMPLE];
-    let bevy_stride = bevy_width as usize * IRRADIANCE_GRID_BYTES_PER_SAMPLE;
+    let mut dest_grid_data =
+        vec![0; dest_width as usize * dest_height as usize * IRRADIANCE_GRID_BYTES_PER_SAMPLE];
+    let bevy_stride = dest_width as usize * IRRADIANCE_GRID_BYTES_PER_SAMPLE;
 
-    for blender_cell_index in 0..sample_count {
-        let bevy_cell_index = blender_cell_index;
-        let bevy_origin = ivec2(
-            (bevy_cell_index % bevy_cells_per_row * 3) as i32,
-            (bevy_cell_index / bevy_cells_per_row * 2) as i32,
+    for src_cell_index in 0..sample_count {
+        let dest_cell_index = src_cell_index;
+        let dest_origin = ivec2(
+            (dest_cell_index % dest_cells_per_row * 3) as i32,
+            (dest_cell_index / dest_cells_per_row * 2) as i32,
         );
 
-        for blender_negative in 0..2 {
-            for blender_axis in 0..3 {
-                let bevy_offset = match (blender_axis, blender_negative) {
-                    (0, 0) => ivec2(0, 0), // Blender +X, Bevy +X
-                    (0, 1) => ivec2(0, 1), // Blender -X, Bevy -X
-                    (1, 0) => ivec2(2, 1), // Blender +Y, Bevy -Z
-                    (1, 1) => ivec2(2, 0), // Blender -Y, Bevy +Z
-                    (2, 0) => ivec2(1, 0), // Blender +Z, Bevy +Y
-                    (2, 1) => ivec2(1, 1), // Blender -Z, Bevy -Y
-                    _ => unreachable!(),
-                };
+        for negative in 0..2 {
+            for axis in 0..3 {
+                let dest_offset = ivec2(axis, negative);
 
-                let blender_sample_index = blender_negative as usize * 3
-                    + blender_axis as usize
-                    + blender_cell_index * IRRADIANCE_GRID_SAMPLES_PER_CELL;
-                let blender_byte_offset = blender_sample_index * IRRADIANCE_GRID_BYTES_PER_SAMPLE;
+                let src_sample_index = negative as usize * 3
+                    + axis as usize
+                    + src_cell_index * IRRADIANCE_GRID_SAMPLES_PER_CELL;
+                let src_byte_offset = src_sample_index * IRRADIANCE_GRID_BYTES_PER_SAMPLE;
 
                 let texel = &grid_sample_data
-                    [blender_byte_offset..(blender_byte_offset + IRRADIANCE_GRID_BYTES_PER_SAMPLE)];
-
-                /*
-                Debugging:
-                let texel: &[u8] = match (x, y) {
-                    (0, 0) => &[255, 0, 0, 128],
-                    (1, 0) => &[0, 255, 0, 128],
-                    (2, 0) => &[0, 0, 255, 128],
-                    (0, 1) => &[255, 255, 0, 128],  // yellow
-                    (1, 1) => &[255, 0, 255, 128],  // pink
-                    (2, 1) => &[0, 255, 255, 128],
-                    _ => unreachable!(),
-                };
-                */
+                    [src_byte_offset..(src_byte_offset + IRRADIANCE_GRID_BYTES_PER_SAMPLE)];
 
                 put_texel(
-                    &mut bevy_grid_data,
+                    &mut dest_grid_data,
                     texel.try_into().unwrap(),
-                    bevy_origin + bevy_offset,
+                    dest_origin + dest_offset,
                     bevy_stride,
                 );
             }
@@ -779,9 +770,9 @@ pub fn update_irradiance_grid(
 
     write_ktx2(
         &mut output_file,
-        &bevy_grid_data,
+        &dest_grid_data,
         TextureFormat::R8G8B8A8Unorm,
-        ivec2(bevy_width, bevy_height as i32),
+        ivec2(dest_width, dest_height as i32),
         1,
     )?;
 
