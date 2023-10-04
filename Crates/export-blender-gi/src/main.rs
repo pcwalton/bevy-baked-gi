@@ -318,18 +318,6 @@ fn extract_irradiance_volumes(
                 ivec2(2, 1), // Bevy -Y, Blender -Z
                 ivec2(1, 0), // Bevy -Z, Blender +Y
             ] {
-                /*
-                let texel: &[u8] = match (blender_offset.x, blender_offset.y) {
-                    (0, 0) => &[255, 0, 0, 128],
-                    (1, 0) => &[0, 255, 0, 128],
-                    (2, 0) => &[0, 0, 255, 128],
-                    (0, 1) => &[255, 255, 0, 128],  // yellow
-                    (1, 1) => &[255, 0, 255, 128],  // pink
-                    (2, 1) => &[0, 255, 255, 128],
-                    _ => unreachable!(),
-                };
-                */
-
                 grid_sample_data.extend_from_slice(&get_texel(
                     &grid_texture_data,
                     origin + blender_offset,
