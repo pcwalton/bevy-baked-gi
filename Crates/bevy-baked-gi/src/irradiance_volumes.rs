@@ -4,6 +4,7 @@
 
 use crate::lightmaps::Lightmap;
 use crate::{AabbExt, GiPbrMaterial};
+use bevy::asset::{AssetLoader, Error as AnyhowError, LoadContext, LoadedAsset};
 use bevy::math::Vec3A;
 use bevy::prelude::{
     Commands, Component, Entity, GlobalTransform, Handle, IVec3, Image, Mat4, Query,
@@ -13,6 +14,8 @@ use bevy::reflect::{Reflect, TypeUuid};
 use bevy::render::extract_component::ExtractComponent;
 use bevy::render::primitives::Aabb;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::render::texture::{CompressedImageFormats, ImageType};
+use bevy::utils::BoxedFuture;
 use serde::{Deserialize, Serialize};
 
 #[doc(hidden)]
@@ -33,7 +36,7 @@ pub struct IrradianceVolume {
     pub meta: IrradianceVolumeMetadata,
 
     /// The actual irradiance volume data.
-    /// 
+    ///
     /// You can generate this with `export-blender-gi`.
     pub image: Handle<Image>,
 }
@@ -58,7 +61,7 @@ pub struct IrradianceVolumeMetadata {
 
 /// Stores information about the irradiance volume on this entity so that the
 /// shader can access it.
-/// 
+///
 /// You don't need to add this component yourself; the
 /// [apply_irradiance_volumes] system automatically detects and applies it to
 /// entities that contain GI PBR materials as appropriate.
@@ -84,6 +87,12 @@ pub struct IrradianceVolumeDescriptor {
     /// The position and size of the irradiance volume in the scene.
     pub transform: Mat4,
 }
+
+/// An asset loader for the data texture ending in `.voxelgi.ktx2`.
+///
+/// This is necessary because Bevy's built-in texture loader loads in sRGB, which will corrupt the
+/// irradiance volume.
+pub struct IrradianceVolumeTextureLoader;
 
 /// A system that determines which irradiance volumes apply to each object and assigns
 /// [AppliedIrradianceVolume] components to affected objects.
@@ -125,5 +134,29 @@ impl IrradianceVolumeMetadata {
     /// The total number of voxels present in the irradiance volume.
     pub fn sample_count(&self) -> usize {
         self.resolution.x as usize * self.resolution.y as usize * self.resolution.z as usize
+    }
+}
+
+impl AssetLoader for IrradianceVolumeTextureLoader {
+    fn load<'a>(
+        &'a self,
+        bytes: &'a [u8],
+        load_context: &'a mut LoadContext,
+    ) -> BoxedFuture<'a, Result<(), AnyhowError>> {
+        Box::pin(async move {
+            let dyn_img = Image::from_buffer(
+                bytes,
+                ImageType::Extension("ktx2"),
+                CompressedImageFormats::empty(),
+                /*is_srgb=*/ false,
+            )?;
+
+            load_context.set_default_asset(LoadedAsset::new(dyn_img));
+            Ok(())
+        })
+    }
+
+    fn extensions(&self) -> &[&str] {
+        &["voxelgi.ktx2"]
     }
 }

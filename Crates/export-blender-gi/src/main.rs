@@ -8,9 +8,9 @@ use crate::ibllib_bindings::{
 use anyhow::Result as AnyhowResult;
 use bevy::app::AppExit;
 use bevy::prelude::{
-    AddAsset, App, AppTypeRegistry, AssetPlugin, AssetServer, ComputedVisibility, EventWriter,
-    GlobalTransform, Handle, ImagePlugin, Mesh, PostStartup, Res, ResMut, Resource, Shader,
-    SpatialBundle, Transform, World,
+    info, AddAsset, App, AppTypeRegistry, AssetPlugin, AssetServer, ComputedVisibility,
+    EventWriter, GlobalTransform, Handle, ImagePlugin, Mesh, PostStartup, Res, ResMut, Resource,
+    Shader, SpatialBundle, Transform, World,
 };
 use bevy::reflect::{ReflectSerialize, TypePath, TypeUuid};
 use bevy::render::view::ViewPlugin;
@@ -326,15 +326,22 @@ fn extract_irradiance_volumes(
             }
         }
 
+        // This path is assets-directory-relative.
         let irradiance_volume_path = update_irradiance_grid(
             &grid_sample_data,
             irradiance_volumes_dir,
+            assets_dir,
             filename,
             irradiance_volume_index,
         )
         .unwrap_or_else(|err| die(format!("{:?}", err)));
 
-        let irradiance_volume_image = load_asset(&irradiance_volume_path, assets_dir, asset_server);
+        println!(
+            "Saving irradiance volume to {}",
+            irradiance_volume_path.display()
+        );
+
+        let irradiance_volume_image = load_asset(&irradiance_volume_path, asset_server);
 
         let irradiance_volume = IrradianceVolume {
             meta,
@@ -484,11 +491,12 @@ fn extract_single_reflection_probe(
         raw_cubemap_path,
         lut_path,
         reflection_probes_dir,
+        assets_dir,
         filename,
     );
 
-    let diffuse_map = load_asset(&cubemap_paths.diffuse, assets_dir, asset_server);
-    let specular_map = load_asset(&cubemap_paths.specular, assets_dir, asset_server);
+    let diffuse_map = load_asset(&cubemap_paths.diffuse, asset_server);
+    let specular_map = load_asset(&cubemap_paths.specular, asset_server);
 
     world
         .spawn(ReflectionProbe {
@@ -508,6 +516,7 @@ fn sample_cubemap(
     raw_cubemap_path: PathBuf,
     lut_path: PathBuf,
     reflection_probes_dir: &Path,
+    assets_dir: &Path,
     filename: &OsStr,
 ) -> CubemapPaths {
     let output_path = reflection_probes_dir.to_owned();
@@ -561,8 +570,8 @@ fn sample_cubemap(
     let _ = fs::remove_file(raw_cubemap_path);
 
     CubemapPaths {
-        diffuse: diffuse_output_path,
-        specular: specular_output_path,
+        diffuse: assets_dir_relative(&diffuse_output_path, assets_dir),
+        specular: assets_dir_relative(&specular_output_path, assets_dir),
     }
 }
 
@@ -661,8 +670,11 @@ fn unpack_f10(n: u32) -> f32 {
     x as f32
 }
 
-fn asset_dir_relative(path: &Path, assets_dir: &Path) -> PathBuf {
-    if let Some(diffed) = pathdiff::diff_paths(path, assets_dir) {
+fn assets_dir_relative(path: &Path, assets_dir: &Path) -> PathBuf {
+    if let Some(diffed) = pathdiff::diff_paths(
+        fs::canonicalize(path).unwrap_or_else(|_| path.to_owned()),
+        fs::canonicalize(assets_dir).unwrap_or_else(|_| assets_dir.to_owned()),
+    ) {
         return diffed;
     }
 
@@ -676,12 +688,11 @@ path instead",
     fs::canonicalize(path).unwrap()
 }
 
-fn load_asset<T>(path: &Path, assets_dir: &Path, asset_server: &mut AssetServer) -> Handle<T>
+fn load_asset<T>(asset_dir_relative_path: &Path, asset_server: &mut AssetServer) -> Handle<T>
 where
     T: TypePath + TypeUuid + Send + Sync,
 {
-    let asset_dir_relative_path = asset_dir_relative(path, assets_dir);
-    asset_server.load::<T, _>(&*asset_dir_relative_path)
+    asset_server.load::<T, _>(asset_dir_relative_path)
 }
 
 fn to_transform_matrix(matrix: &Mat4) -> Transform {
@@ -694,49 +705,73 @@ fn to_transform_matrix(matrix: &Mat4) -> Transform {
 pub fn update_irradiance_grid(
     grid_sample_data: &[u8],
     irradiance_volumes_dir: &Path,
+    assets_dir: &Path,
     filename: &OsStr,
     irradiance_volume_index: usize,
 ) -> AnyhowResult<PathBuf> {
     let sample_count = grid_sample_data.len() / IRRADIANCE_GRID_BYTES_PER_CELL;
 
     // FIXME: Pick this dynamically.
-    let dest_width = 768;
-    let dest_cells_per_row = dest_width as usize / 3;
-    let dest_height = div_ceil(sample_count as _, dest_cells_per_row as _) * 2;
+    let bevy_width = 768;
+    let bevy_cells_per_row = bevy_width as usize / 3;
+    let bevy_height = div_ceil(sample_count as _, bevy_cells_per_row as _) * 2;
 
-    let mut dest_grid_data =
-        vec![0; dest_width as usize * dest_height as usize * IRRADIANCE_GRID_BYTES_PER_SAMPLE];
-    let dest_stride = dest_width as usize * IRRADIANCE_GRID_BYTES_PER_SAMPLE;
+    let mut bevy_grid_data =
+        vec![0; bevy_width as usize * bevy_height as usize * IRRADIANCE_GRID_BYTES_PER_SAMPLE];
+    let bevy_stride = bevy_width as usize * IRRADIANCE_GRID_BYTES_PER_SAMPLE;
 
-    for src_cell_index in 0..sample_count {
-        let dest_cell_index = src_cell_index;
-        let dest_origin = ivec2(
-            (dest_cell_index % dest_cells_per_row * 3) as i32,
-            (dest_cell_index / dest_cells_per_row * 2) as i32,
+    for blender_cell_index in 0..sample_count {
+        let bevy_cell_index = blender_cell_index;
+        let bevy_origin = ivec2(
+            (bevy_cell_index % bevy_cells_per_row * 3) as i32,
+            (bevy_cell_index / bevy_cells_per_row * 2) as i32,
         );
 
-        for y in 0..2 {
-            for x in 0..3 {
-                let dest_offset = ivec2(x, y);
-                let src_sample_index = dest_offset.y as usize * 3
-                    + dest_offset.x as usize
-                    + src_cell_index * IRRADIANCE_GRID_SAMPLES_PER_CELL;
-                let src_byte_offset = src_sample_index * IRRADIANCE_GRID_BYTES_PER_SAMPLE;
+        for blender_negative in 0..2 {
+            for blender_axis in 0..3 {
+                let bevy_offset = match (blender_axis, blender_negative) {
+                    (0, 0) => ivec2(0, 0), // Blender +X, Bevy +X
+                    (0, 1) => ivec2(0, 1), // Blender -X, Bevy -X
+                    (1, 0) => ivec2(2, 1), // Blender +Y, Bevy -Z
+                    (1, 1) => ivec2(2, 0), // Blender -Y, Bevy +Z
+                    (2, 0) => ivec2(1, 0), // Blender +Z, Bevy +Y
+                    (2, 1) => ivec2(1, 1), // Blender -Z, Bevy -Y
+                    _ => unreachable!(),
+                };
+
+                let blender_sample_index = blender_negative as usize * 3
+                    + blender_axis as usize
+                    + blender_cell_index * IRRADIANCE_GRID_SAMPLES_PER_CELL;
+                let blender_byte_offset = blender_sample_index * IRRADIANCE_GRID_BYTES_PER_SAMPLE;
 
                 let texel = &grid_sample_data
-                    [src_byte_offset..(src_byte_offset + IRRADIANCE_GRID_BYTES_PER_SAMPLE)];
+                    [blender_byte_offset..(blender_byte_offset + IRRADIANCE_GRID_BYTES_PER_SAMPLE)];
+
+                /*
+                Debugging:
+                let texel: &[u8] = match (x, y) {
+                    (0, 0) => &[255, 0, 0, 128],
+                    (1, 0) => &[0, 255, 0, 128],
+                    (2, 0) => &[0, 0, 255, 128],
+                    (0, 1) => &[255, 255, 0, 128],  // yellow
+                    (1, 1) => &[255, 0, 255, 128],  // pink
+                    (2, 1) => &[0, 255, 255, 128],
+                    _ => unreachable!(),
+                };
+                */
+
                 put_texel(
-                    &mut dest_grid_data,
+                    &mut bevy_grid_data,
                     texel.try_into().unwrap(),
-                    dest_origin + dest_offset,
-                    dest_stride,
+                    bevy_origin + bevy_offset,
+                    bevy_stride,
                 );
             }
         }
     }
 
     let output_path = irradiance_volumes_dir.join(format!(
-        "{}.voxelgi.{:0>3}.ktx2",
+        "{}.{:0>3}.voxelgi.ktx2",
         filename.to_string_lossy(),
         irradiance_volume_index
     ));
@@ -744,13 +779,20 @@ pub fn update_irradiance_grid(
 
     write_ktx2(
         &mut output_file,
-        &dest_grid_data,
+        &bevy_grid_data,
         TextureFormat::R8G8B8A8Unorm,
-        ivec2(dest_width, dest_height as i32),
+        ivec2(bevy_width, bevy_height as i32),
         1,
     )?;
 
-    Ok(output_path)
+    let relative = assets_dir_relative(&output_path, assets_dir);
+    println!(
+        "{} + {} -> {}",
+        output_path.display(),
+        assets_dir.display(),
+        relative.display()
+    );
+    Ok(relative)
 }
 
 /// `stride` is in bytes.

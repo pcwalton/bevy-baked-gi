@@ -55,6 +55,7 @@ use bevy::render::view::{ExtractedView, VisibleEntities};
 use bevy::render::{ExtractSchedule, Render, RenderApp, RenderSet};
 use bevy::scene::Scene;
 use bevy::utils::HashMap;
+use irradiance_volumes::IrradianceVolumeTextureLoader;
 use reflection_probes::ReflectionProbe;
 use serde_json::{Error as SerdeJsonError, Value};
 use std::path::PathBuf;
@@ -305,7 +306,8 @@ impl Plugin for BakedGiPlugin {
                 custom_vertex_attributes: self.custom_vertex_attributes.clone(),
             },
             kung_fu_death_grip: (*app.world.resource::<LightmapUvKungFuDeathGrip>()).clone(),
-        });
+        })
+        .add_asset_loader(IrradianceVolumeTextureLoader);
     }
 }
 

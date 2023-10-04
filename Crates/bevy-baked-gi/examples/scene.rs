@@ -6,13 +6,13 @@ use bevy::asset::{AssetPath, HandleId};
 use bevy::core_pipeline::bloom::BloomSettings;
 use bevy::core_pipeline::experimental::taa::TemporalAntiAliasBundle;
 use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::math::Vec3A;
+use bevy::ecs::system::EntityCommands;
 use bevy::pbr::ScreenSpaceAmbientOcclusionBundle;
 use bevy::prelude::{
     info, warn, Added, AmbientLight, App, AppTypeRegistry, AssetPlugin, AssetServer, Camera,
-    Camera3dBundle, Changed, Children, Color, Commands, Deref, DerefMut, DirectionalLight, Entity,
-    Msaa, Name, PluginGroup, PointLight, Query, ReflectComponent, Res, ResMut, Resource, Startup,
-    Transform, Update, Vec3, World,
+    Camera3dBundle, Changed, Children, Color, Commands, Component, Deref, DerefMut,
+    DirectionalLight, Entity, Msaa, PluginGroup, PointLight, Query, ReflectComponent, Res, ResMut,
+    Resource, Startup, Transform, Update, Vec3, With, World,
 };
 use bevy::reflect::ReflectRef;
 use bevy::scene::{DynamicSceneBundle, SceneBundle, SceneInstance};
@@ -26,18 +26,24 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-const FERRIS_ROTATION_SPEED: f32 = 0.01;
+const SCENE_ROTATION_SPEED: f32 = 0.01;
 
 /// Displays one or more Bevy scenes with global illumination applied.
 #[derive(Parser, Resource)]
 #[command(author, version, about)]
 struct Args {
-    /// The scenes to display.
+    /// The scenes to display, as `.glb`, `.gltf`, or `.scn.ron`.
     ///
     /// Multiple scenes can be provided, and if so then all scenes will be
     /// merged together and displayed at once.
     #[arg()]
     scene: Vec<PathBuf>,
+
+    /// Scenes that will rotate.
+    ///
+    /// This is useful for testing reflection probes.
+    #[arg(long)]
+    rotating_scene: Vec<PathBuf>,
 
     /// The directory that all assets are relative to.
     ///
@@ -49,6 +55,9 @@ struct Args {
 
 #[derive(Resource, Default, Deref, DerefMut)]
 struct AssetIds(HashMap<HandleId, PathBuf>);
+
+#[derive(Component)]
+struct Rotating;
 
 fn main() {
     let args = Args::parse();
@@ -64,7 +73,7 @@ fn main() {
         }))
         .add_plugins(BakedGiPlugin::default())
         .add_systems(Startup, setup)
-        .add_systems(Update, rotate_ferris)
+        .add_systems(Update, rotate_scenes)
         .add_systems(Update, apply_shadows_to_lights)
         .add_systems(Update, get_handle_ids_from_new_entities)
         .init_resource::<AssetIds>()
@@ -79,7 +88,7 @@ fn main() {
 
 fn setup(
     mut commands: Commands,
-    asset_server: ResMut<AssetServer>,
+    mut asset_server: ResMut<AssetServer>,
     args: Res<Args>,
     mut asset_ids: ResMut<AssetIds>,
 ) {
@@ -91,6 +100,7 @@ fn setup(
         asset_ids.insert(handle_id, asset_path);
     }
 
+    /*
     commands
         .spawn(Camera3dBundle {
             transform: Transform::from_xyz(80.0, 20.0, -3.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -104,42 +114,43 @@ fn setup(
         .insert(ScreenSpaceAmbientOcclusionBundle::default())
         .insert(TemporalAntiAliasBundle::default())
         .insert(BloomSettings::default());
+    */
 
     for scene_path in &args.scene {
-        if ["gltf", "glb"]
-            .iter()
-            .any(|extension| scene_path.extension() == Some(OsStr::new(extension)))
-        {
-            println!("trying to load {}", scene_path.display());
-            commands.spawn(SceneBundle {
-                scene: asset_server.load(format!("{}#Scene0", scene_path.display())),
-                transform: Transform::IDENTITY,
-                ..SceneBundle::default()
-            });
-        } else {
-            commands.spawn(DynamicSceneBundle {
-                scene: asset_server.load(scene_path.to_string_lossy().into_owned()),
-                transform: Transform::IDENTITY,
-                ..DynamicSceneBundle::default()
-            });
-        };
+        spawn_scene(&mut commands, &mut asset_server, scene_path);
     }
 
-    /*// TODO: Make this configurable.
-    commands
-        .spawn(SceneBundle {
-            scene: asset_server.load("Ferris.glb#Scene0"),
-            transform: Transform::from_scale(Vec3::splat(12.5)),
-            ..SceneBundle::default()
-        })
-        .insert(Name::new("Ferris"));*/
+    for scene_path in &args.rotating_scene {
+        spawn_scene(&mut commands, &mut asset_server, scene_path).insert(Rotating);
+    }
 }
 
-fn rotate_ferris(mut query: Query<(&Name, &mut Transform)>) {
-    for (name, mut transform) in query.iter_mut() {
-        if &**name == "Ferris" {
-            transform.rotate_axis(Vec3::Y, FERRIS_ROTATION_SPEED);
-        }
+fn spawn_scene<'w, 's, 'a>(
+    commands: &'a mut Commands<'w, 's>,
+    asset_server: &mut AssetServer,
+    scene_path: &Path,
+) -> EntityCommands<'w, 's, 'a> {
+    if ["gltf", "glb"]
+        .iter()
+        .any(|extension| scene_path.extension() == Some(OsStr::new(extension)))
+    {
+        commands.spawn(SceneBundle {
+            scene: asset_server.load(format!("{}#Scene0", scene_path.display())),
+            transform: Transform::IDENTITY,
+            ..SceneBundle::default()
+        })
+    } else {
+        commands.spawn(DynamicSceneBundle {
+            scene: asset_server.load(scene_path.to_string_lossy().into_owned()),
+            transform: Transform::IDENTITY,
+            ..DynamicSceneBundle::default()
+        })
+    }
+}
+
+fn rotate_scenes(mut query: Query<&mut Transform, With<Rotating>>) {
+    for mut transform in query.iter_mut() {
+        transform.rotate_axis(Vec3::Y, SCENE_ROTATION_SPEED);
     }
 }
 

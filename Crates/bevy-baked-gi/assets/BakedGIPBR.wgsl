@@ -32,7 +32,9 @@
 struct Vertex {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
+#ifdef VERTEX_UVS
     @location(2) uv: vec2<f32>,
+#endif
 #ifdef VERTEX_TANGENTS
     @location(3) tangent: vec4<f32>,
 #endif
@@ -55,7 +57,9 @@ struct MeshGiVertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
     @location(1) world_normal: vec3<f32>,
+#ifdef VERTEX_UVS
     @location(2) uv: vec2<f32>,
+#endif
 #ifdef VERTEX_TANGENTS
     @location(3) world_tangent: vec4<f32>,
 #endif
@@ -220,19 +224,15 @@ fn voxelgi_sample_irradiance_volume(P: vec3<f32>, n: vec3<f32>, r: vec3<f32>) ->
 }
 
 fn irradiance_volume_light(
-    perceptual_roughness: f32,
-    roughness: f32,
     diffuse_color: vec3<f32>,
-    NdotV: f32,
-    f_ab: vec2<f32>,
     P: vec3<f32>,
     N: vec3<f32>,
     R: vec3<f32>,
-    F0: vec3<f32>,
-) -> EnvironmentMapLight {
+) -> vec3<f32> {
     let split_sum = voxelgi_sample_irradiance_volume(P, N, R);
-    return compute_ibl(
-        split_sum.irradiance, split_sum.radiance, roughness, diffuse_color, NdotV, f_ab, F0);
+    return split_sum.irradiance * diffuse_color;
+    /*return compute_ibl(
+        split_sum.irradiance, split_sum.radiance, roughness, diffuse_color, NdotV, f_ab, F0);*/
 }
 
 #endif  // FRAGMENT_IRRADIANCE_VOLUME
@@ -358,8 +358,8 @@ fn pbr(
     indirect_light += (environment_light.diffuse * occlusion) + environment_light.specular;
 #else
 #ifdef FRAGMENT_IRRADIANCE_VOLUME
-    let environment_light = irradiance_volume_light(perceptual_roughness, roughness, diffuse_color, NdotV, f_ab, in.world_position.xyz, in.N, R, F0);
-    indirect_light += (environment_light.diffuse * occlusion) + environment_light.specular;
+    let environment_light = irradiance_volume_light(diffuse_color, in.world_position.xyz, in.N, R);
+    indirect_light += environment_light;
 #else
 #ifdef ENVIRONMENT_MAP
     // Environment map light (indirect)
