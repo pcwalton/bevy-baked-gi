@@ -121,11 +121,11 @@ var<uniform> lightmap_settings: LightmapSettings;
 #endif
 
 #ifdef FRAGMENT_REFLECTION_PROBE
-@group(3) @binding(0)
+@group(4) @binding(0)
 var reflection_probe_diffuse: texture_cube<f32>;
-@group(3) @binding(1)
+@group(4) @binding(1)
 var reflection_probe_specular: texture_cube<f32>;
-@group(3) @binding(2)
+@group(4) @binding(2)
 var reflection_probe_sampler: sampler;
 #endif
 
@@ -195,7 +195,6 @@ fn voxelgi_sample_irradiance_volume(P: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
 
     var weight_accum = 0.0;
     var irradiance_accum = vec3(0.0);
-    var radiance_accum = vec3(0.0);
 
     for (var i = 0; i < 8; i++) {
         let offset = vec3(i, i / 2, i / 4) & vec3(1);
@@ -238,7 +237,7 @@ fn reflection_probe_light(
     // Split-sum approximation for image based lighting: https://cdn2.unrealengine.com/Resources/files/2013SiggraphPresentationsNotes-26915738.pdf
     // Technically we could use textureNumLevels(environment_map_specular) - 1 here, but we use a uniform
     // because textureNumLevels() does not work on WebGL2
-    let radiance_level = perceptual_roughness * 2.0;
+    let radiance_level = perceptual_roughness * f32(textureNumLevels(reflection_probe_specular) - 1u);
     let irradiance = textureSample(reflection_probe_diffuse, reflection_probe_sampler, vec3(N.xy, -N.z)).rgb;
     let radiance = textureSampleLevel(reflection_probe_specular, reflection_probe_sampler, vec3(R.xy, -R.z), radiance_level).rgb;
 
@@ -333,28 +332,62 @@ fn pbr(
         direct_light += light_contrib * shadow;
     }
 
-    // Ambient light (indirect)
-    var indirect_light = ambient::ambient_light(in.world_position, in.N, in.V, NdotV, diffuse_color, F0, perceptual_roughness, occlusion);
+    // Handle indirect light. First, calculate all the potential sources of indirect light,
+    // starting with ambient light.
+    let ambient_light = ambient::ambient_light(in.world_position, in.N, in.V, NdotV, diffuse_color, F0, perceptual_roughness, occlusion);
 
+    // Now for lightmap light, if applicable.
 #ifdef VERTEX_LIGHTMAP_UVS
-    indirect_light += textureSample(lightmap_texture, lightmap_sampler, lightmap_uv).rgb * lightmap_settings.exposure * diffuse_color;
-#else
+    let lightmap_light = textureSample(lightmap_texture, lightmap_sampler, lightmap_uv).rgb * lightmap_settings.exposure * in.material.base_color;
+#endif
+
+    // And now for irradiance volumes.
+#ifdef FRAGMENT_IRRADIANCE_VOLUME
+    let voxel_light = irradiance_volume_light(diffuse_color, in.world_position.xyz, in.N);
+#endif
+
+    // Finally, environment map light. This either comes from the nearest reflection probe or from
+    // the global environment map.
 #ifdef FRAGMENT_REFLECTION_PROBE
     let environment_light = reflection_probe_light(perceptual_roughness, roughness, diffuse_color, NdotV, f_ab, in.N, R, F0);
-    indirect_light += (environment_light.diffuse * occlusion) + environment_light.specular;
-#else
-#ifdef FRAGMENT_IRRADIANCE_VOLUME
-    let environment_light = irradiance_volume_light(diffuse_color, in.world_position.xyz, in.N);
-    indirect_light += environment_light;
 #else
 #ifdef ENVIRONMENT_MAP
-    // Environment map light (indirect)
     let environment_light = bevy_pbr::environment_map::environment_map_light(perceptual_roughness, roughness, diffuse_color, NdotV, f_ab, in.N, R, F0);
-    indirect_light += (environment_light.diffuse * occlusion) + environment_light.specular;
 #endif  // ENVIRONMENT_MAP
-#endif  // FRAGMENT_IRRADIANCE_VOLUME
 #endif  // FRAGMENT_REFLECTION_PROBE
+
+    // Sum up indirect light, starting with the diffuse term. We obey the following order:
+    // TODO
+    var indirect_light = ambient_light;
+#ifdef VERTEX_LIGHTMAP_UVS
+    indirect_light += lightmap_light * (1.0 - metallic);
+#else
+#ifdef FRAGMENT_IRRADIANCE_VOLUME
+    indirect_light += voxel_light * occlusion;
+#else
+#ifdef FRAGMENT_REFLECTION_PROBE
+    indirect_light += environment_light.diffuse * occlusion;
+#else
+#ifdef ENVIRONMENT_MAP
+    indirect_light += environment_light.diffuse * occlusion;
+#endif  // ENVIRONMENT_MAP
+#endif  // FRAGMENT_REFLECTION_PROBE
+#endif  // FRAGMENT_IRRADIANCE_VOLUME
 #endif  // VERTEX_LIGHTMAP_UVS
+
+    // Now for the specular term. The order is as follows:
+    // TODO
+#ifdef FRAGMENT_REFLECTION_PROBE
+    indirect_light += environment_light.specular;
+#else
+#ifdef VERTEX_LIGHTMAP_UVS
+    indirect_light += lightmap_light * metallic;
+#else
+#ifdef ENVIRONMENT_MAP
+    indirect_light += environment_light.specular;
+#endif  // ENVIRONMENT_MAP
+#endif  // VERTEX_LIGHTMAP_UVS
+#endif  // FRAGMENT_REFLECTION_PROBE
 
     let emissive_light = emissive.rgb * output_color.a;
 

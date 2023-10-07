@@ -58,6 +58,7 @@ use bevy::utils::HashMap;
 use irradiance_volumes::IrradianceVolumeTextureLoader;
 use reflection_probes::ReflectionProbe;
 use serde_json::{Error as SerdeJsonError, Value};
+use std::mem;
 use std::path::PathBuf;
 use thiserror::Error as Thiserror;
 
@@ -79,6 +80,7 @@ pub struct BakedGiPlugin {
 #[derive(Resource)]
 pub struct GiPbrPipeline {
     material_pipeline: MaterialPipeline<GiPbrMaterial>,
+    empty_diffuse_bind_group_layout: BindGroupLayout,
     irradiance_volume_bind_group_layout: BindGroupLayout,
     lightmap_bind_group_layout: BindGroupLayout,
     reflection_probe_bind_group_layout: BindGroupLayout,
@@ -100,24 +102,24 @@ pub struct GiPbrMaterial(pub StandardMaterial);
 /// bind group.
 #[derive(Component)]
 pub struct RenderGiPbrData {
-    /// The prepared shader bind group for the lighting.
-    pub lighting: PreparedBindGroup<()>,
+    /// The prepared shader bind group for the diffuse indirect lighting.
+    pub diffuse_indirect: PreparedBindGroup<()>,
+    /// The prepared shader bind group for the reflection probe.
+    pub reflection_probe: Option<PreparedBindGroup<()>>,
 }
 
 /// A [RenderCommand] that sets the bind group necessary to render with a reflection probe or
 /// irradiance volume.
-pub struct SetGiPbrBindGroup<const I: usize>;
+pub struct SetGiPbrBindGroup<const I: usize, const J: usize>;
 
-/// The type of global illumination that is to be applied to a mesh.
+/// The type of diffuse global illumination that is to be applied to a mesh.
 #[derive(Clone, Copy, Debug, Reflect, PartialEq, Eq, Hash)]
-pub enum GiType {
+pub enum DiffuseIndirectType {
     /// No global illumination is to be applied, other than possibly an environment map.
-    NoGi,
+    EnvironmentMapOnly,
     /// The mesh has a lightmap that captures the indirect and baked lights.
     Lightmapped,
-    /// The mesh has a baked reflection probe that captures the surrounding scene.
-    ReflectionProbe,
-    /// The mesh is located within an irradiance volume that captures the surrounding light.
+    /// The mesh is located within an irradiance volume that captures the surrounding diffuse light.
     IrradianceVolume,
 }
 
@@ -128,7 +130,7 @@ pub type DrawGiPbrMaterial = (
     SetMeshViewBindGroup<0>,
     SetMaterialBindGroup<GiPbrMaterial, 1>,
     SetMeshBindGroup<2>,
-    SetGiPbrBindGroup<3>,
+    SetGiPbrBindGroup<3, 4>,
     DrawMesh,
 );
 
@@ -138,8 +140,11 @@ pub struct GiPbrPipelineKey {
     /// The wrapped material pipeline key.
     pub material: MaterialPipelineKey<GiPbrMaterial>,
 
-    /// The type of baked global illumination.
-    pub lighting: GiType,
+    /// The type of baked diffuse global illumination.
+    pub diffuse_indirect_type: DiffuseIndirectType,
+
+    /// Whether we have a reflection probe.
+    pub has_reflection_probe: bool,
 }
 
 /// Settings that can be present in glTF files as glTF extras.
@@ -213,6 +218,11 @@ trait AabbExt {
     /// has a length of 2 units.
     fn centered_unit_cube() -> Self;
 }
+
+/// A placeholder bind group when there is no need to store additional uniforms
+/// relating to indirect diffuse global illumination.
+#[derive(AsBindGroup)]
+struct EmptyIndirectDiffuse {}
 
 /// A handle to the main baked global illumination PBR shader.
 pub const BAKED_GI_PBR_SHADER_HANDLE: HandleUntyped =
@@ -344,39 +354,52 @@ pub fn prepare_gi_pbr_meshes(
             continue;
         };
 
-        let maybe_lighting_bind_group = match (maybe_lightmap, maybe_reflection_probe) {
+        let maybe_diffuse_indirect_bind_group = match (maybe_lightmap, maybe_irradiance_volume_info)
+        {
             (Some(lightmap), _) if mesh.layout.contains(LIGHTMAP_UV_ATTRIBUTE.clone()) => lightmap
                 .as_bind_group(
                     &pipeline.lightmap_bind_group_layout,
                     &render_device,
                     &images,
                     &fallback_image,
-                ),
-            (_, Some(reflection_probe)) => reflection_probe.as_bind_group(
-                &pipeline.reflection_probe_bind_group_layout,
-                &render_device,
-                &images,
-                &fallback_image,
-            ),
-            _ => maybe_irradiance_volume_info
-                .cloned()
-                .unwrap_or_default()
+                )
+                .ok(),
+            (_, Some(irradiance_volume_info)) => irradiance_volume_info
                 .as_bind_group(
                     &pipeline.irradiance_volume_bind_group_layout,
                     &render_device,
                     &images,
                     &fallback_image,
-                ),
+                )
+                .ok(),
+            _ => None,
         };
 
-        match maybe_lighting_bind_group {
-            Ok(lighting) => {
-                commands.entity(entity).insert(RenderGiPbrData { lighting });
+        let Some(diffuse_indirect_bind_group) = maybe_diffuse_indirect_bind_group else {
+            warn!("Failed to create bind group for globally-illuminated PBR material");
+            return;
+        };
+
+        let maybe_reflection_probe_bind_group = match maybe_reflection_probe {
+            None => None,
+            Some(reflection_probe) => {
+                let Ok(reflection_probe_bind_group) = reflection_probe.as_bind_group(
+                    &pipeline.reflection_probe_bind_group_layout,
+                    &render_device,
+                    &images,
+                    &fallback_image,
+                ) else {
+                    warn!("Failed to create bind group for globally-illuminated PBR material");
+                    return;
+                };
+                Some(reflection_probe_bind_group)
             }
-            _ => {
-                warn!("Failed to create bind group for globally-illuminated PBR material");
-            }
-        }
+        };
+
+        commands.entity(entity).insert(RenderGiPbrData {
+            diffuse_indirect: diffuse_indirect_bind_group,
+            reflection_probe: maybe_reflection_probe_bind_group,
+        });
     }
 }
 
@@ -402,6 +425,7 @@ pub fn queue_gi_pbr_material_meshes(
         &MeshUniform,
         Option<&Lightmap>,
         Option<&AppliedReflectionProbe>,
+        Option<&AppliedIrradianceVolume>,
     )>,
     images: Res<RenderAssets<Image>>,
     mut views: Query<(
@@ -493,6 +517,7 @@ pub fn queue_gi_pbr_material_meshes(
                 mesh_uniform,
                 maybe_lightmap,
                 maybe_reflection_probe,
+                maybe_irradiance_volume,
             )) = material_meshes.get(*visible_entity)
             {
                 if let (Some(mesh), Some(material)) = (
@@ -527,14 +552,14 @@ pub fn queue_gi_pbr_material_meshes(
                         _ => (),
                     }
 
-                    let lighting_type = if maybe_lightmap.is_some()
+                    let diffuse_indirect_type = if maybe_lightmap.is_some()
                         && mesh.layout.contains(LIGHTMAP_UV_ATTRIBUTE.clone())
                     {
-                        GiType::Lightmapped
-                    } else if maybe_reflection_probe.is_some() {
-                        GiType::ReflectionProbe
+                        DiffuseIndirectType::Lightmapped
+                    } else if maybe_irradiance_volume.is_some() {
+                        DiffuseIndirectType::IrradianceVolume
                     } else {
-                        GiType::IrradianceVolume
+                        DiffuseIndirectType::EnvironmentMapOnly
                     };
 
                     // Specialize the pipeline.
@@ -547,7 +572,8 @@ pub fn queue_gi_pbr_material_meshes(
                                 mesh_key,
                                 bind_group_data: material.key.clone(),
                             },
-                            lighting: lighting_type,
+                            diffuse_indirect_type,
+                            has_reflection_probe: maybe_reflection_probe.is_some(),
                         },
                         &mesh.layout,
                     );
@@ -599,6 +625,8 @@ pub fn queue_gi_pbr_material_meshes(
 impl FromWorld for GiPbrPipeline {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
+        let empty_diffuse_bind_group_layout =
+            EmptyIndirectDiffuse::bind_group_layout(render_device);
         let irradiance_volume_bind_group_layout =
             AppliedIrradianceVolume::bind_group_layout(render_device);
         let lightmap_bind_group_layout = Lightmap::bind_group_layout(render_device);
@@ -606,6 +634,7 @@ impl FromWorld for GiPbrPipeline {
             AppliedReflectionProbe::bind_group_layout(render_device);
         GiPbrPipeline {
             material_pipeline: MaterialPipeline::from_world(world),
+            empty_diffuse_bind_group_layout,
             irradiance_volume_bind_group_layout,
             lightmap_bind_group_layout,
             reflection_probe_bind_group_layout,
@@ -642,17 +671,22 @@ impl SpecializedMeshPipeline for GiPbrPipeline {
             vertex_attributes.push(Mesh::ATTRIBUTE_COLOR.at_shader_location(4));
         }
 
-        let maybe_define = match key.lighting {
-            GiType::NoGi => None,
-            GiType::Lightmapped => {
+        let mut defines = vec![];
+        match key.diffuse_indirect_type {
+            DiffuseIndirectType::EnvironmentMapOnly => {}
+            DiffuseIndirectType::Lightmapped => {
                 vertex_attributes.push(LIGHTMAP_UV_ATTRIBUTE.at_shader_location(7));
-                Some("VERTEX_LIGHTMAP_UVS")
+                defines.push("VERTEX_LIGHTMAP_UVS");
             }
-            GiType::ReflectionProbe => Some("FRAGMENT_REFLECTION_PROBE"),
-            GiType::IrradianceVolume => Some("FRAGMENT_IRRADIANCE_VOLUME"),
+            DiffuseIndirectType::IrradianceVolume => {
+                defines.push("FRAGMENT_IRRADIANCE_VOLUME");
+            }
         };
+        if key.has_reflection_probe {
+            defines.push("FRAGMENT_REFLECTION_PROBE");
+        }
 
-        if let Some(define) = maybe_define {
+        for define in defines {
             descriptor.vertex.shader_defs.push(define.into());
             if let Some(ref mut fragment) = descriptor.fragment {
                 fragment.shader_defs.push(define.into());
@@ -662,24 +696,32 @@ impl SpecializedMeshPipeline for GiPbrPipeline {
         let vertex_layout = layout.get_layout(&vertex_attributes).unwrap();
         descriptor.vertex.buffers = vec![vertex_layout];
 
-        // Push the appropriate bind group.
-        let gi_bind_group_layout = match key.lighting {
-            GiType::NoGi => None,
-            GiType::ReflectionProbe => Some(self.reflection_probe_bind_group_layout.clone()),
-            GiType::IrradianceVolume => Some(self.irradiance_volume_bind_group_layout.clone()),
-            GiType::Lightmapped => Some(self.lightmap_bind_group_layout.clone()),
+        // Push the appropriate bind group for the diffuse lighting.
+
+        let gi_bind_group_layout = match key.diffuse_indirect_type {
+            DiffuseIndirectType::EnvironmentMapOnly => self.empty_diffuse_bind_group_layout.clone(),
+            DiffuseIndirectType::IrradianceVolume => {
+                self.irradiance_volume_bind_group_layout.clone()
+            }
+            DiffuseIndirectType::Lightmapped => self.lightmap_bind_group_layout.clone(),
         };
 
-        if let Some(gi_bind_group_layout) = gi_bind_group_layout {
-            debug_assert_eq!(descriptor.layout.len(), 3);
-            descriptor.layout.push(gi_bind_group_layout);
+        debug_assert_eq!(descriptor.layout.len(), 3);
+        descriptor.layout.push(gi_bind_group_layout);
+
+        // Push the appropriate bind group for the specular lighting, if applicable.
+        if key.has_reflection_probe {
+            debug_assert_eq!(descriptor.layout.len(), 4);
+            descriptor
+                .layout
+                .push(self.reflection_probe_bind_group_layout.clone());
         }
 
         Ok(descriptor)
     }
 }
 
-impl<P, const I: usize> RenderCommand<P> for SetGiPbrBindGroup<I>
+impl<P, const I: usize, const J: usize> RenderCommand<P> for SetGiPbrBindGroup<I, J>
 where
     P: PhaseItem,
 {
@@ -698,7 +740,10 @@ where
         match entity {
             None => RenderCommandResult::Failure,
             Some(gi_pbr_data) => {
-                pass.set_bind_group(I, &gi_pbr_data.lighting.bind_group, &[]);
+                pass.set_bind_group(I, &gi_pbr_data.diffuse_indirect.bind_group, &[]);
+                if let Some(reflection_probe_bind_group) = &gi_pbr_data.reflection_probe {
+                    pass.set_bind_group(J, &reflection_probe_bind_group.bind_group, &[]);
+                }
                 RenderCommandResult::Success
             }
         }
@@ -725,8 +770,8 @@ pub fn upgrade_pbr_materials(
         let Some(pbr_material) =
             standard_material_assets.get(standard_material_handle) else { continue };
 
-        let new_pbr_gi_material =
-            pbr_gi_material_assets.add(GiPbrMaterial((*pbr_material).clone()));
+        let pbr_material = (*pbr_material).clone();
+        let new_pbr_gi_material = pbr_gi_material_assets.add(GiPbrMaterial(pbr_material));
 
         commands
             .entity(entity)
@@ -888,5 +933,41 @@ impl Material for GiPbrMaterial {
 
     fn prepass_fragment_shader() -> ShaderRef {
         PBR_PREPASS_SHADER_HANDLE.typed().into()
+    }
+
+    #[inline]
+    fn alpha_mode(&self) -> AlphaMode {
+        self.0.alpha_mode()
+    }
+
+    #[inline]
+    fn depth_bias(&self) -> f32 {
+        self.0.depth_bias
+    }
+
+    // Copied and pasted from `bevy_pbr::pbr_material`.
+    fn specialize(
+        pipeline: &MaterialPipeline<Self>,
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayout,
+        key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        // FIXME: This is pretty nasty, but it's the cleanest way I can see to call into
+        // [StandardMaterial::specialize].
+        unsafe {
+            let pipeline = mem::transmute::<
+                &MaterialPipeline<Self>,
+                &MaterialPipeline<StandardMaterial>,
+            >(pipeline);
+            StandardMaterial::specialize(
+                pipeline,
+                descriptor,
+                layout,
+                MaterialPipelineKey {
+                    mesh_key: key.mesh_key,
+                    bind_group_data: key.bind_group_data,
+                },
+            )
+        }
     }
 }

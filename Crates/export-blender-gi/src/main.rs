@@ -27,10 +27,15 @@ use glam::{ivec2, uvec2, vec3, vec4, IVec2, IVec3, Mat4, UVec2, Vec3, Vec3Swizzl
 use ibllib_bindings::{
     IBLLib_OutputFormat_R32G32B32A32_SFLOAT, IBLLib_OutputFormat_R8G8B8A8_UNORM,
 };
+use ruzstd::decoding::block_decoder::BlockHeaderReadError;
+use ruzstd::frame::{FrameHeaderError, ReadFrameHeaderError};
+use ruzstd::frame_decoder::FrameDecoderError;
+use ruzstd::{frame_decoder, BlockDecodingStrategy, FrameDecoder, StreamingDecoder};
 use std::env;
 use std::ffi::{CString, OsStr};
+use std::fmt::Debug;
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Error as IoError, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use tempfile::NamedTempFile;
@@ -73,6 +78,8 @@ static BEVY_AXES_TO_BLENDER_AXES: Mat4 = Mat4::from_cols(
     vec4(0.0, 1.0, 0.0, 0.0),
     vec4(0.0, 0.0, 0.0, 1.0),
 );
+
+static ZSTD_MAGIC_NUMBER: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 
 /// Exports global illumination from a Blender file into a Bevy scene.
 #[derive(Parser, Resource, Clone)]
@@ -165,13 +172,9 @@ fn go(
 
     let assets_dir = args.assets_dir();
     let filename = args.input.file_stem().expect("No file stem found");
+    let blend_data = decompress_blender_file(blend_file);
 
-    let mut blend_data = vec![];
-    blend_file
-        .read_to_end(&mut blend_data)
-        .unwrap_or_else(|err| die(format!("Failed to read the Blender file: {:?}", err)));
-
-    // TODO: Decompress with `zlib` or Zstd if necessary.
+    // TODO: Decompress with `zlib` if necessary.
     let blend = Blend::new(&blend_data[..])
         .unwrap_or_else(|err| die(format!("Failed to parse the Blender file: {:?}", err)));
 
@@ -224,6 +227,13 @@ fn go(
 fn die(message: impl AsRef<str>) -> ! {
     eprintln!("Error: {}", message.as_ref());
     process::exit(1)
+}
+
+fn die_with_zstd_frame_decoder_error(err: impl Debug) -> ! {
+    die(format!(
+        "Failed to decode the Zstandard-compressed Blender file: {:?}",
+        err
+    ));
 }
 
 impl Args {
@@ -567,7 +577,9 @@ fn sample_cubemap(
     }
 
     let _ = fs::remove_file(lut_path);
-    let _ = fs::remove_file(raw_cubemap_path);
+    //let _ = fs::remove_file(raw_cubemap_path);
+
+    println!("keeping raw cubemap at {}", raw_cubemap_path.display());
 
     CubemapPaths {
         diffuse: assets_dir_relative(&diffuse_output_path, assets_dir),
@@ -944,4 +956,66 @@ impl TextureFormat {
             TextureFormat::R8G8B8A8Unorm => 1,
         }
     }
+}
+
+fn decompress_blender_file(mut blend_file: File) -> Vec<u8> {
+    let mut magic_number = [0; 4];
+    if let Err(err) = blend_file.read_exact(&mut magic_number) {
+        die(format!("File wasn't a Blender file: {:?}", err));
+    }
+    if let Err(err) = blend_file.seek(SeekFrom::Start(0)) {
+        die(format!("Failed to read the Blender file: {:?}", err));
+    }
+
+    let mut blend_data = vec![];
+    if magic_number != ZSTD_MAGIC_NUMBER {
+        blend_file
+            .read_to_end(&mut blend_data)
+            .unwrap_or_else(|err| die(format!("Failed to read the Blender file: {:?}", err)));
+        return blend_data;
+    }
+
+    let mut zstd_decoder = FrameDecoder::new();
+
+    loop {
+        match zstd_decoder.reset(&mut blend_file) {
+            Ok(()) => {}
+
+            Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::BadMagicNumber(
+                _,
+            )))
+            | Err(FrameDecoderError::ReadFrameHeaderError(
+                ReadFrameHeaderError::MagicNumberReadError(_),
+            )) => break,
+
+            Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame(
+                _,
+                len,
+            ))) => {
+                if let Err(err) = blend_file.seek(SeekFrom::Current(len as _)) {
+                    die_with_zstd_frame_decoder_error(err)
+                }
+            }
+            Err(err) => die_with_zstd_frame_decoder_error(err),
+        }
+
+        match zstd_decoder.decode_blocks(&mut blend_file, BlockDecodingStrategy::All) {
+            Ok(_) => {}
+            Err(FrameDecoderError::FailedToReadBlockHeader(BlockHeaderReadError::ReadError(
+                io_error,
+            ))) if io_error.kind() == ErrorKind::UnexpectedEof => break,
+
+            Err(err) => die_with_zstd_frame_decoder_error(err),
+        }
+
+        if let Err(err) = zstd_decoder.read_to_end(&mut blend_data) {
+            die_with_zstd_frame_decoder_error(err);
+        }
+    }
+
+    info!(
+        "Decompressed Zstandard-compressed Blender file to {} bytes",
+        blend_data.len()
+    );
+    blend_data
 }

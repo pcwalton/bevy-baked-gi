@@ -96,6 +96,7 @@ pub struct IrradianceVolumeTextureLoader;
 
 /// A system that determines which irradiance volumes apply to each object and assigns
 /// [AppliedIrradianceVolume] components to affected objects.
+#[warn(clippy::never_loop)]
 pub fn apply_irradiance_volumes(
     mut commands: Commands,
     irradiance_volume_query: Query<(&IrradianceVolume, &GlobalTransform)>,

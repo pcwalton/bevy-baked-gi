@@ -54,6 +54,7 @@ pub struct AppliedReflectionProbe {
 }
 
 /// A system that determines which reflection probe to apply to each mesh.
+#[warn(clippy::never_loop)]
 pub fn apply_reflection_probes(
     mut commands: Commands,
     reflection_probes_query: Query<(&ReflectionProbe, &GlobalTransform)>,
@@ -65,13 +66,13 @@ pub fn apply_reflection_probes(
                 reflection_probe_transform.compute_matrix().inverse()
                     * target_transform.translation().extend(1.0),
             );
-            if Aabb::centered_unit_cube().contains_point(point) {
+            //if Aabb::centered_unit_cube().contains_point(point) {
                 commands.entity(target).insert(AppliedReflectionProbe {
                     diffuse_map: Some(reflection_probe.diffuse_map.clone()),
                     specular_map: Some(reflection_probe.specular_map.clone()),
                 });
                 continue 'outer;
-            }
+            //}
         }
 
         commands.entity(target).remove::<AppliedReflectionProbe>();

@@ -116,12 +116,22 @@ fn setup(
         .insert(BloomSettings::default());
     */
 
-    for scene_path in &args.scene {
-        spawn_scene(&mut commands, &mut asset_server, scene_path);
+    for absolute_scene_path in &args.scene {
+        let relative_scene_path = pathdiff::diff_paths(
+            fs::canonicalize(absolute_scene_path).unwrap_or_else(|_| absolute_scene_path.clone()),
+            &assets_dir,
+        )
+        .unwrap_or_else(|| (*absolute_scene_path).clone());
+        spawn_scene(&mut commands, &mut asset_server, &relative_scene_path);
     }
 
-    for scene_path in &args.rotating_scene {
-        spawn_scene(&mut commands, &mut asset_server, scene_path).insert(Rotating);
+    for absolute_scene_path in &args.rotating_scene {
+        let relative_scene_path = pathdiff::diff_paths(
+            fs::canonicalize(absolute_scene_path).unwrap_or_else(|_| absolute_scene_path.clone()),
+            &assets_dir,
+        )
+        .unwrap_or_else(|| (*absolute_scene_path).clone());
+        spawn_scene(&mut commands, &mut asset_server, &relative_scene_path).insert(Rotating);
     }
 }
 
