@@ -1,3 +1,5 @@
 [submodule "Contrib/glTF-IBL-Sampler"]
 	path = Contrib/glTF-IBL-Sampler
 	url = https://github.com/pcwalton/glTF-IBL-Sampler.git
+	branch = lite
+

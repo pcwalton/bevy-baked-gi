@@ -577,9 +577,7 @@ fn sample_cubemap(
     }
 
     let _ = fs::remove_file(lut_path);
-    //let _ = fs::remove_file(raw_cubemap_path);
-
-    println!("keeping raw cubemap at {}", raw_cubemap_path.display());
+    let _ = fs::remove_file(raw_cubemap_path);
 
     CubemapPaths {
         diffuse: assets_dir_relative(&diffuse_output_path, assets_dir),

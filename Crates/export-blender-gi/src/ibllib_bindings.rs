@@ -14,6 +14,7 @@ pub type IBLLib_Result = ::std::os::raw::c_uint;
 pub const IBLLib_OutputFormat_R8G8B8A8_UNORM: IBLLib_OutputFormat = 37;
 pub const IBLLib_OutputFormat_R16G16B16A16_SFLOAT: IBLLib_OutputFormat = 97;
 pub const IBLLib_OutputFormat_R32G32B32A32_SFLOAT: IBLLib_OutputFormat = 109;
+pub const IBLLib_OutputFormat_B9G9R9E5_UFLOAT: IBLLib_OutputFormat = 123;
 pub type IBLLib_OutputFormat = ::std::os::raw::c_int;
 pub const IBLLib_Distribution_None: IBLLib_Distribution = 0;
 pub const IBLLib_Distribution_Lambertian: IBLLib_Distribution = 1;
