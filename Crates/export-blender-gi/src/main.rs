@@ -19,22 +19,27 @@ use bevy_baked_gi::irradiance_volumes::{
 use bevy_baked_gi::reflection_probes::ReflectionProbe;
 use blend::{Blend, Instance};
 use byteorder::{LittleEndian, WriteBytesExt};
-use clap::Parser;
-use glam::{ivec2, vec4, IVec2, IVec3, Mat4, Vec3, Vec3Swizzles};
+use clap::{Parser, ValueEnum};
+use glam::{ivec2, vec4, IVec2, IVec3, Mat4, Vec3, Vec3Swizzles, Vec4};
 use ibllib_bindings::{
+    IBLLib_OutputFormat_B9G9R9E5_UFLOAT, IBLLib_OutputFormat_R16G16B16A16_SFLOAT,
     IBLLib_OutputFormat_R32G32B32A32_SFLOAT, IBLLib_OutputFormat_R8G8B8A8_UNORM,
 };
+use reflection_probes::ReflectionProbeExtractor;
 use ruzstd::decoding::block_decoder::BlockHeaderReadError;
 use ruzstd::frame::ReadFrameHeaderError;
 use ruzstd::frame_decoder::FrameDecoderError;
 use ruzstd::{BlockDecodingStrategy, FrameDecoder};
-use std::env;
+use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::{array, env};
+use vk2dfd::VkFormat;
 
 #[allow(non_upper_case_globals, non_camel_case_types, unused)]
 mod ibllib_bindings;
@@ -42,20 +47,6 @@ mod reflection_probes;
 
 const IRRADIANCE_GRID_BYTES_PER_SAMPLE: usize = 4;
 const IRRADIANCE_GRID_SAMPLES_PER_CELL: usize = 6;
-
-const KHR_DF_VERSIONNUMBER_1_3: u16 = 2;
-const DFD_DESCRIPTOR_SIZE: u16 = 24 + 16 * 4;
-const DFD_TOTAL_SIZE: u32 = DFD_DESCRIPTOR_SIZE as u32 + 4;
-const KHR_DF_MODEL_RGBSDA: u8 = 1;
-const KHR_DF_PRIMARIES_UNSPECIFIED: u8 = 0;
-const KHR_DF_TRANSFER_LINEAR: u8 = 1;
-const KHR_DF_FLAG_ALPHA_STRAIGHT: u8 = 0;
-const KHR_DF_SAMPLE_DATATYPE_SIGNED: u8 = 1 << 6;
-const KHR_DF_SAMPLE_DATATYPE_FLOAT: u8 = 1 << 7;
-const KHR_DF_CHANNEL_RGBSDA_R: u32 = 0;
-const KHR_DF_CHANNEL_RGBSDA_G: u32 = 1;
-const KHR_DF_CHANNEL_RGBSDA_B: u32 = 2;
-const KHR_DF_CHANNEL_RGBSDA_A: u32 = 15;
 
 const SAMPLE_COUNT: u32 = 1024;
 const LOD_BIAS: f32 = 0.0;
@@ -101,6 +92,26 @@ struct Args {
     /// The path to the directory where reflection probe cubemaps will be stored.
     #[arg(long)]
     reflection_probes_dir: Option<PathBuf>,
+
+    /// The format to output reflection probes in.
+    #[arg(short = 'f', long, value_enum, default_value_t = TextureFormat::B9G9R9E5Ufloat)]
+    reflection_probe_format: TextureFormat,
+
+    /// The number of mipmap levels diffuse reflection probes should have.
+    ///
+    /// If not specified, a default value is chosen.
+    #[arg(long)]
+    diffuse_reflection_probe_mipmap_count: Option<u32>,
+
+    /// The pixel size on each side of the diffuse reflection probes.
+    ///
+    /// It may be desirable to store them at low res because they're blurry.
+    #[arg(long)]
+    diffuse_reflection_probe_size: Option<u32>,
+
+    /// Uses proposed upstream Bevy types where possible.
+    #[arg(short, long)]
+    upstream: bool,
 }
 
 struct CubemapPaths {
@@ -108,11 +119,31 @@ struct CubemapPaths {
     specular: PathBuf,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, ValueEnum)]
 #[repr(i32)]
 enum TextureFormat {
     R32G32B32A32Sfloat = IBLLib_OutputFormat_R32G32B32A32_SFLOAT,
+    R16G16B16A16Sfloat = IBLLib_OutputFormat_R16G16B16A16_SFLOAT,
+    B9G9R9E5Ufloat = IBLLib_OutputFormat_B9G9R9E5_UFLOAT,
     R8G8B8A8Unorm = IBLLib_OutputFormat_R8G8B8A8_UNORM,
+}
+
+/// The component that defines an irradiance volume.
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+struct UpstreamBevyIrradianceVolume {
+    /// Transforms a canonical voxel cube with corners at (0, 0, 0) and (1, 1,
+    /// 1) to world space.  In other words, this matrix specifies a
+    /// transformation from a cube whose side length is 1 and centered at (0.5,
+    /// 0.5, 0.5), representing a *single* voxel (not the entire voxel grid), to
+    /// the scene's world space.
+    pub transform: Transform,
+
+    /// The size of the voxel grid, in voxels.
+    pub resolution: IVec3,
+
+    /// The voxel grid data, stored as 32-bit floating point RGBA.
+    /// TODO(pcwalton): Switch to RGB9e5.
+    pub data: Vec<Vec4>,
 }
 
 fn main() {
@@ -161,7 +192,7 @@ fn go(
     let blender_scene = blend
         .instances_with_code(*b"SC")
         .next()
-        .unwrap_or_else(|| die(format!("The Blender file didn't find a scene.")));
+        .unwrap_or_else(|| die("The Blender file didn't find a scene."));
     let eevee = blender_scene.get("eevee");
     let light_cache_data = eevee.get("light_cache_data");
 
@@ -175,16 +206,19 @@ fn go(
         &args.irradiance_volumes_dir(),
         &assets_dir,
         filename,
+        args.upstream,
     );
 
-    reflection_probes::extract_reflection_probes(
-        &mut world,
-        &mut asset_server,
-        &light_cache_data,
-        &args.reflection_probes_dir(),
-        &assets_dir,
+    ReflectionProbeExtractor {
+        light_cache_data: &light_cache_data,
+        reflection_probes_dir: &args.reflection_probes_dir(),
+        assets_dir: &assets_dir,
         filename,
-    );
+        reflection_probe_format: args.reflection_probe_format,
+        diffuse_reflection_probe_mipmap_count: args.diffuse_reflection_probe_mipmap_count,
+        diffuse_reflection_probe_size: args.diffuse_reflection_probe_size,
+    }
+    .extract_reflection_probes(&mut world, &mut asset_server);
 
     // Write scene.
     let bevy_scene = DynamicScene::from_world(&world);
@@ -254,6 +288,7 @@ fn extract_irradiance_volumes(
     irradiance_volumes_dir: &Path,
     assets_dir: &Path,
     filename: &OsStr,
+    using_upstream_types: bool,
 ) {
     let grid_texture = light_cache_data.get("grid_tx");
     let grid_texture_data = grid_texture.get_u8_vec("data");
@@ -317,14 +352,27 @@ fn extract_irradiance_volumes(
         }
 
         // This path is assets-directory-relative.
-        let irradiance_volume_path = update_irradiance_grid(
-            &grid_sample_data,
-            irradiance_volumes_dir,
-            assets_dir,
-            filename,
-            irradiance_volume_index,
-        )
-        .unwrap_or_else(|err| die(format!("{:?}", err)));
+        let irradiance_volume_path = if !using_upstream_types {
+            update_irradiance_grid(
+                &grid_sample_data,
+                irradiance_volumes_dir,
+                assets_dir,
+                filename,
+                irradiance_volume_index,
+            )
+            .unwrap_or_else(|err| die(format!("{:?}", err)))
+        } else {
+            update_irradiance_grid_upstream(
+                &grid_sample_data,
+                irradiance_volumes_dir,
+                assets_dir,
+                filename,
+                irradiance_volume_index,
+                &Transform::from_matrix(transform),
+                resolution,
+            )
+            .unwrap_or_else(|err| die(format!("{:?}", err)))
+        };
 
         println!(
             "Saving irradiance volume to {}",
@@ -464,10 +512,79 @@ pub fn update_irradiance_grid(
     Ok(relative)
 }
 
+pub fn update_irradiance_grid_upstream(
+    grid_sample_data: &[u8],
+    irradiance_volumes_dir: &Path,
+    assets_dir: &Path,
+    filename: &OsStr,
+    irradiance_volume_index: usize,
+    transform: &Transform,
+    resolution: IVec3,
+) -> AnyhowResult<PathBuf> {
+    let sample_count = grid_sample_data.len() / IRRADIANCE_GRID_BYTES_PER_CELL;
+
+    let mut dest_grid_data = vec![Vec4::ZERO; sample_count * IRRADIANCE_GRID_SAMPLES_PER_CELL];
+
+    for src_cell_index in 0..sample_count {
+        let dest_start = src_cell_index * IRRADIANCE_GRID_SAMPLES_PER_CELL;
+
+        for negative in 0..2 {
+            for axis in 0..3 {
+                let dest_offset = axis * 2 + negative;
+
+                let src_sample_index = negative as usize * 3
+                    + axis as usize
+                    + src_cell_index * IRRADIANCE_GRID_SAMPLES_PER_CELL;
+                let src_byte_offset = src_sample_index * IRRADIANCE_GRID_BYTES_PER_SAMPLE;
+
+                let texel = &grid_sample_data
+                    [src_byte_offset..(src_byte_offset + IRRADIANCE_GRID_BYTES_PER_SAMPLE)];
+
+                put_upstream_sample(
+                    &mut dest_grid_data,
+                    texel.try_into().unwrap(),
+                    dest_start + dest_offset,
+                );
+            }
+        }
+    }
+
+    let output_path = irradiance_volumes_dir.join(format!(
+        "{}.{:0>3}.voxelgi.bincode",
+        filename.to_string_lossy(),
+        irradiance_volume_index
+    ));
+    let mut output_file = File::create(&output_path)?;
+
+    bincode::serialize_into(
+        &mut output_file,
+        &UpstreamBevyIrradianceVolume {
+            transform: *transform,
+            resolution,
+            data: dest_grid_data,
+        },
+    )?;
+
+    let relative = assets_dir_relative(&output_path, assets_dir);
+    println!(
+        "{} + {} -> {}",
+        output_path.display(),
+        assets_dir.display(),
+        relative.display()
+    );
+    Ok(relative)
+}
+
 /// `stride` is in bytes.
 fn put_texel(buffer: &mut [u8], texel: [u8; 4], p: IVec2, stride: usize) {
     let offset = p.y as usize * stride + p.x as usize * IRRADIANCE_GRID_BYTES_PER_SAMPLE;
     buffer[offset..offset + 4].copy_from_slice(&texel)
+}
+
+fn put_upstream_sample(buffer: &mut [Vec4], texel: [u8; 4], index: usize) {
+    let exponent = f32::exp2(texel[3] as f32 - 128.0);
+    let rgb = Vec3::from_array(array::from_fn(|i| texel[i] as f32 / 255.0 * exponent));
+    buffer[index] = rgb.extend(1.0);
 }
 
 fn div_ceil(a: u32, b: u32) -> u32 {
@@ -505,12 +622,13 @@ where
     }
 
     let dfd_byte_offset_pos = output.stream_position()?;
+    let dfd = vk2dfd::vk2dfd(texture_format as VkFormat)?;
 
     for value in [
-        0,              // dfdByteOffset
-        DFD_TOTAL_SIZE, // dfdByteLength
-        0,              // kvdByteOffset
-        0,              // kvdByteLength
+        0,                            // dfdByteOffset
+        mem::size_of_val(dfd) as u32, // dfdByteLength
+        0,                            // kvdByteOffset
+        0,                            // kvdByteLength
     ]
     .into_iter()
     {
@@ -531,62 +649,11 @@ where
 
     let dfd_byte_offset = output.stream_position()?;
 
-    output.write_u32::<LittleEndian>(DFD_TOTAL_SIZE)?; // dfdTotalSize
-    for value in [
-        0,                        // vendorId
-        0,                        // descriptorType
-        KHR_DF_VERSIONNUMBER_1_3, // versionNumber
-        DFD_DESCRIPTOR_SIZE,      // descriptorBlockSize
-    ]
-    .into_iter()
-    {
-        output.write_u16::<LittleEndian>(value)?;
+    for &word in dfd {
+        output.write_u32::<LittleEndian>(word)?;
     }
 
-    output.write_all(&[
-        KHR_DF_MODEL_RGBSDA,               // colorModel
-        KHR_DF_PRIMARIES_UNSPECIFIED,      // colorPrimaries
-        KHR_DF_TRANSFER_LINEAR,            // transferFunction
-        KHR_DF_FLAG_ALPHA_STRAIGHT,        // flags
-        0,                                 // texelBlockDimension0
-        0,                                 // texelBlockDimension1
-        0,                                 // texelBlockDimension2
-        0,                                 // texelBlockDimension3
-        texture_format.bytes_per_sample(), // bytesPlane0
-        0,                                 // bytesPlane1
-        0,                                 // bytesPlane2
-        0,                                 // bytesPlane3
-        0,                                 // bytesPlane4
-        0,                                 // bytesPlane5
-        0,                                 // bytesPlane6
-        0,                                 // bytesPlane7
-    ])?;
-
-    let mut current_bit = 0;
-    for &channel_type in [
-        KHR_DF_CHANNEL_RGBSDA_R,
-        KHR_DF_CHANNEL_RGBSDA_G,
-        KHR_DF_CHANNEL_RGBSDA_B,
-        KHR_DF_CHANNEL_RGBSDA_A,
-    ]
-    .iter()
-    {
-        let bit_length = texture_format.bits_per_channel();
-        output.write_u16::<LittleEndian>(current_bit)?; // bitOffset
-        output.write_all(&[
-            bit_length as u8 - 1, // bitLength
-            // channelType
-            (channel_type as u8) | texture_format.special_sample_flags(),
-            0, // samplePosition0
-            0, // samplePosition1
-            0, // samplePosition2
-            0, // samplePosition3
-        ])?;
-        output.write_u32::<LittleEndian>(0)?; // sampleLower
-        output.write_u32::<LittleEndian>(1065353216)?; // sampleUpper
-        current_bit += bit_length;
-    }
-
+    // Align up.
     let mut level_byte_offset = output.stream_position()?;
     while level_byte_offset % texture_format.bytes_per_sample() as u64 != 0 {
         output.write_all(&[0])?;
@@ -608,29 +675,16 @@ impl TextureFormat {
     fn bytes_per_sample(self) -> u8 {
         match self {
             TextureFormat::R32G32B32A32Sfloat => 16,
-            TextureFormat::R8G8B8A8Unorm => 4,
-        }
-    }
-
-    fn bits_per_channel(self) -> u16 {
-        match self {
-            TextureFormat::R32G32B32A32Sfloat => 32,
-            TextureFormat::R8G8B8A8Unorm => 8,
-        }
-    }
-
-    fn special_sample_flags(self) -> u8 {
-        match self {
-            TextureFormat::R32G32B32A32Sfloat => {
-                KHR_DF_SAMPLE_DATATYPE_SIGNED | KHR_DF_SAMPLE_DATATYPE_FLOAT
-            }
-            TextureFormat::R8G8B8A8Unorm => 0,
+            TextureFormat::R16G16B16A16Sfloat => 8,
+            TextureFormat::B9G9R9E5Ufloat | TextureFormat::R8G8B8A8Unorm => 4,
         }
     }
 
     fn type_size(self) -> u32 {
         match self {
             TextureFormat::R32G32B32A32Sfloat => 4,
+            TextureFormat::R16G16B16A16Sfloat => todo!(),
+            TextureFormat::B9G9R9E5Ufloat => todo!(),
             TextureFormat::R8G8B8A8Unorm => 1,
         }
     }

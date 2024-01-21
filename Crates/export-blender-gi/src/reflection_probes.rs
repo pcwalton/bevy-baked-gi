@@ -11,8 +11,7 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 use crate::ibllib_bindings::{
-    self, IBLLib_Distribution_GGX, IBLLib_Distribution_Lambertian,
-    IBLLib_OutputFormat_R32G32B32A32_SFLOAT, IBLLib_Result_Success,
+    self, IBLLib_Distribution_GGX, IBLLib_Distribution_Lambertian, IBLLib_Result_Success,
 };
 use crate::{CubemapPaths, TextureFormat, LOD_BIAS, SAMPLE_COUNT};
 
@@ -33,76 +32,85 @@ enum CubeFaceRotation {
     Rotate90Cw,
 }
 
-pub(crate) struct CubeData<'a> {
-    pub(crate) cube_data: &'a Instance<'a>,
-    pub(crate) cubemap_index: usize,
-    pub(crate) cube_dimensions: IVec2,
-    pub(crate) cube_texture_data: &'a [u8],
+pub(crate) struct ReflectionProbeExtractor<'a> {
+    pub(crate) light_cache_data: &'a Instance<'a>,
+    pub(crate) reflection_probes_dir: &'a Path,
+    pub(crate) assets_dir: &'a Path,
+    pub(crate) filename: &'a OsStr,
+    pub(crate) reflection_probe_format: TextureFormat,
+    pub(crate) diffuse_reflection_probe_mipmap_count: Option<u32>,
+    pub(crate) diffuse_reflection_probe_size: Option<u32>,
 }
 
-pub(crate) fn extract_reflection_probes(
-    world: &mut World,
-    asset_server: &mut AssetServer,
-    light_cache_data: &Instance,
-    reflection_probes_dir: &Path,
-    assets_dir: &Path,
-    filename: &OsStr,
-) {
-    let cube_texture = light_cache_data.get("cube_tx");
-    let cube_dimensions = IVec3::from_slice(&cube_texture.get_i32_vec("tex_size")).xy();
-    let cube_texture_data = cube_texture.get_u8_vec("data");
-
-    let cube_data = light_cache_data.get_iter("cube_data").collect::<Vec<_>>();
-
-    let cubemap_face_byte_size_r11g11b10 =
-        cube_dimensions.x as usize * cube_dimensions.y as usize * 4;
-    let cubemap_byte_size_r11g11b10 = cubemap_face_byte_size_r11g11b10 * 6;
-    let cubemap_count = cube_texture_data.len() / cubemap_byte_size_r11g11b10;
-    debug_assert_eq!(cube_texture_data.len() % cubemap_byte_size_r11g11b10, 0);
-    debug_assert_eq!(cubemap_count, cube_data.len());
-
-    for (cubemap_index, cube_data) in cube_data.iter().enumerate() {
-        CubeData {
-            cube_data,
-            cubemap_index,
-            cube_dimensions,
-            cube_texture_data: &cube_texture_data,
-        }
-        .extract_single_reflection_probe(
-            world,
-            asset_server,
-            reflection_probes_dir,
-            assets_dir,
-            filename,
-        );
-    }
+struct CubeData<'a> {
+    cube_data: &'a Instance<'a>,
+    cubemap_index: usize,
+    cube_dimensions: IVec2,
+    cube_texture_data: &'a [u8],
 }
 
-impl<'a> CubeData<'a> {
-    pub(crate) fn extract_single_reflection_probe(
+impl<'a> ReflectionProbeExtractor<'a> {
+    pub(crate) fn extract_reflection_probes(
         &self,
         world: &mut World,
         asset_server: &mut AssetServer,
-        reflection_probes_dir: &Path,
-        assets_dir: &Path,
-        filename: &OsStr,
+    ) {
+        let cube_texture = self.light_cache_data.get("cube_tx");
+        let cube_dimensions = IVec3::from_slice(&cube_texture.get_i32_vec("tex_size")).xy();
+        let cube_texture_data = cube_texture.get_u8_vec("data");
+
+        let cube_data = self
+            .light_cache_data
+            .get_iter("cube_data")
+            .collect::<Vec<_>>();
+
+        let cubemap_face_byte_size_r11g11b10 =
+            cube_dimensions.x as usize * cube_dimensions.y as usize * 4;
+        let cubemap_byte_size_r11g11b10 = cubemap_face_byte_size_r11g11b10 * 6;
+        let cubemap_count = cube_texture_data.len() / cubemap_byte_size_r11g11b10;
+        debug_assert_eq!(cube_texture_data.len() % cubemap_byte_size_r11g11b10, 0);
+        debug_assert_eq!(cubemap_count, cube_data.len());
+
+        for (cubemap_index, cube_data) in cube_data.iter().enumerate() {
+            self.extract_single_reflection_probe(
+                world,
+                asset_server,
+                &CubeData {
+                    cube_data,
+                    cubemap_index,
+                    cube_dimensions,
+                    cube_texture_data: &cube_texture_data,
+                },
+            );
+        }
+    }
+
+    fn extract_single_reflection_probe(
+        &self,
+        world: &mut World,
+        asset_server: &mut AssetServer,
+        cube_data: &CubeData,
     ) {
         // There seems to always be a reflection probe present with an all-zero matrix. Ignore it.
         let attenuation_matrix =
-            Mat4::from_cols_slice(&self.cube_data.get_f32_vec("attenuationmat"));
+            Mat4::from_cols_slice(&cube_data.cube_data.get_f32_vec("attenuationmat"));
         if attenuation_matrix == Mat4::ZERO {
             return;
         }
 
         let transform = crate::to_transform_matrix(&attenuation_matrix);
 
-        let cubemap_face_byte_size_rgba_f32 =
-            self.cube_dimensions.x as usize * self.cube_dimensions.y as usize * 16;
-        let cubemap_byte_size_rgba_f32 = cubemap_face_byte_size_rgba_f32 * 6;
+        let output_cubemap_face_byte_size_rgba_f32 = cube_data.cube_dimensions.x as usize
+            * cube_data.cube_dimensions.y as usize
+            * TextureFormat::R32G32B32A32Sfloat.bytes_per_sample() as usize;
+        let output_cubemap_byte_size_rgba_f32 = output_cubemap_face_byte_size_rgba_f32 * 6;
 
-        let mut output_data = vec![0; cubemap_byte_size_rgba_f32];
+        let mut output_data = vec![0; output_cubemap_byte_size_rgba_f32];
 
-        let (width, height) = (self.cube_dimensions.x as u32, self.cube_dimensions.y as u32);
+        let (width, height) = (
+            cube_data.cube_dimensions.x as u32,
+            cube_data.cube_dimensions.y as u32,
+        );
 
         // Cubemap faces are stored in the order +X, -X, +Y, -Y, +Z, -Z.
         //   +X ← mirror(ccw(+X))
@@ -116,9 +124,9 @@ impl<'a> CubeData<'a> {
                 for x in 0..width {
                     let src_pos = uvec2(x, y);
                     let texel = get_cubemap_texel(
-                        self.cube_texture_data,
-                        self.cube_dimensions.as_uvec2(),
-                        self.cubemap_index,
+                        cube_data.cube_texture_data,
+                        cube_data.cube_dimensions.as_uvec2(),
+                        cube_data.cubemap_index,
                         src_face_index,
                         src_pos,
                     );
@@ -135,7 +143,7 @@ impl<'a> CubeData<'a> {
                     put_cubemap_texel(
                         &mut output_data,
                         texel,
-                        self.cube_dimensions.as_uvec2(),
+                        cube_data.cube_dimensions.as_uvec2(),
                         dest_face_index,
                         dest_pos,
                     );
@@ -149,7 +157,7 @@ impl<'a> CubeData<'a> {
             &mut raw_cubemap,
             &output_data,
             TextureFormat::R32G32B32A32Sfloat,
-            self.cube_dimensions,
+            cube_data.cube_dimensions,
             6,
         )
         .unwrap();
@@ -158,15 +166,8 @@ impl<'a> CubeData<'a> {
         let lut = NamedTempFile::new().expect("Failed to create temporary file for the LUT");
         let (_, lut_path) = lut.keep().unwrap();
 
-        let cubemap_paths = sample_cubemap(
-            self.cubemap_index,
-            height,
-            raw_cubemap_path,
-            lut_path,
-            reflection_probes_dir,
-            assets_dir,
-            filename,
-        );
+        let cubemap_paths =
+            self.sample_cubemap(cube_data.cubemap_index, height, raw_cubemap_path, lut_path);
 
         let diffuse_map = crate::load_asset(&cubemap_paths.diffuse, asset_server);
         let specular_map = crate::load_asset(&cubemap_paths.specular, asset_server);
@@ -182,72 +183,73 @@ impl<'a> CubeData<'a> {
             })
             .remove::<ComputedVisibility>();
     }
+
+    fn sample_cubemap(
+        &self,
+        cubemap_index: usize,
+        height: u32,
+        raw_cubemap_path: PathBuf,
+        lut_path: PathBuf,
+    ) -> CubemapPaths {
+        let output_path = self.reflection_probes_dir.to_owned();
+        let diffuse_output_path = output_path.join(format!(
+            "{}.diffuse.{:0>3}.ktx2",
+            self.filename.to_string_lossy(),
+            cubemap_index
+        ));
+        let specular_output_path = output_path.join(format!(
+            "{}.specular.{:0>3}.ktx2",
+            self.filename.to_string_lossy(),
+            cubemap_index
+        ));
+
+        unsafe {
+            let raw_cubemap_path = CString::new(raw_cubemap_path.to_str().unwrap()).unwrap();
+            let diffuse_output_path = CString::new(diffuse_output_path.to_str().unwrap()).unwrap();
+            let specular_output_path =
+                CString::new(specular_output_path.to_str().unwrap()).unwrap();
+            let lut_path = CString::new(lut_path.to_str().unwrap()).unwrap();
+
+            println!("diffuse size={:?}", self.diffuse_reflection_probe_size);
+            let result = ibllib_bindings::IBLSample(
+                raw_cubemap_path.as_ptr(),
+                diffuse_output_path.as_ptr(),
+                lut_path.as_ptr(),
+                IBLLib_Distribution_Lambertian,
+                self.diffuse_reflection_probe_size.unwrap_or(height),
+                self.diffuse_reflection_probe_mipmap_count.unwrap_or(0),
+                SAMPLE_COUNT,
+                self.reflection_probe_format as _,
+                LOD_BIAS,
+                false,
+            );
+            assert_eq!(result, IBLLib_Result_Success);
+
+            let result = ibllib_bindings::IBLSample(
+                raw_cubemap_path.as_ptr(),
+                specular_output_path.as_ptr(),
+                lut_path.as_ptr(),
+                IBLLib_Distribution_GGX,
+                height,
+                0,
+                SAMPLE_COUNT,
+                self.reflection_probe_format as _,
+                LOD_BIAS,
+                false,
+            );
+            assert_eq!(result, IBLLib_Result_Success);
+        }
+
+        let _ = fs::remove_file(lut_path);
+        let _ = fs::remove_file(raw_cubemap_path);
+
+        CubemapPaths {
+            diffuse: crate::assets_dir_relative(&diffuse_output_path, self.assets_dir),
+            specular: crate::assets_dir_relative(&specular_output_path, self.assets_dir),
+        }
+    }
 }
 
-fn sample_cubemap(
-    cubemap_index: usize,
-    height: u32,
-    raw_cubemap_path: PathBuf,
-    lut_path: PathBuf,
-    reflection_probes_dir: &Path,
-    assets_dir: &Path,
-    filename: &OsStr,
-) -> CubemapPaths {
-    let output_path = reflection_probes_dir.to_owned();
-    let diffuse_output_path = output_path.join(format!(
-        "{}.diffuse.{:0>3}.ktx2",
-        filename.to_string_lossy(),
-        cubemap_index
-    ));
-    let specular_output_path = output_path.join(format!(
-        "{}.specular.{:0>3}.ktx2",
-        filename.to_string_lossy(),
-        cubemap_index
-    ));
-
-    unsafe {
-        let raw_cubemap_path = CString::new(raw_cubemap_path.to_str().unwrap()).unwrap();
-        let diffuse_output_path = CString::new(diffuse_output_path.to_str().unwrap()).unwrap();
-        let specular_output_path = CString::new(specular_output_path.to_str().unwrap()).unwrap();
-        let lut_path = CString::new(lut_path.to_str().unwrap()).unwrap();
-
-        let result = ibllib_bindings::IBLSample(
-            raw_cubemap_path.as_ptr(),
-            diffuse_output_path.as_ptr(),
-            lut_path.as_ptr(),
-            IBLLib_Distribution_Lambertian,
-            height,
-            0,
-            SAMPLE_COUNT,
-            IBLLib_OutputFormat_R32G32B32A32_SFLOAT,
-            LOD_BIAS,
-            false,
-        );
-        assert_eq!(result, IBLLib_Result_Success);
-
-        let result = ibllib_bindings::IBLSample(
-            raw_cubemap_path.as_ptr(),
-            specular_output_path.as_ptr(),
-            lut_path.as_ptr(),
-            IBLLib_Distribution_GGX,
-            height,
-            0,
-            SAMPLE_COUNT,
-            IBLLib_OutputFormat_R32G32B32A32_SFLOAT,
-            LOD_BIAS,
-            false,
-        );
-        assert_eq!(result, IBLLib_Result_Success);
-    }
-
-    let _ = fs::remove_file(lut_path);
-    let _ = fs::remove_file(raw_cubemap_path);
-
-    CubemapPaths {
-        diffuse: crate::assets_dir_relative(&diffuse_output_path, assets_dir),
-        specular: crate::assets_dir_relative(&specular_output_path, assets_dir),
-    }
-}
 fn cubemap_texel_byte_offset(
     cube_dimensions: UVec2,
     cubemap_index: usize,

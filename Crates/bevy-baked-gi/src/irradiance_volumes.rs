@@ -3,7 +3,7 @@
 //! Baked voxel grids storing indirect light.
 
 use crate::lightmaps::Lightmap;
-use crate::{AabbExt, GiPbrMaterial};
+use crate::GiPbrMaterial;
 use bevy::asset::{AssetLoader, Error as AnyhowError, LoadContext, LoadedAsset};
 use bevy::math::Vec3A;
 use bevy::prelude::{
@@ -116,14 +116,14 @@ pub fn apply_irradiance_volumes(
             let irradiance_volume_transform = irradiance_volume_transform.compute_matrix();
             let point = Vec3A::from(irradiance_volume_transform.inverse() * center.extend(1.0));
             //if Aabb::centered_unit_cube().contains_point(point) {
-                commands.entity(target).insert(AppliedIrradianceVolume {
-                    irradiance_volume_descriptor: IrradianceVolumeDescriptor {
-                        meta: irradiance_volume.meta.clone(),
-                        transform: irradiance_volume_transform,
-                    },
-                    irradiance_volume_texture: Some(irradiance_volume.image.clone()),
-                });
-                continue 'outer;
+            commands.entity(target).insert(AppliedIrradianceVolume {
+                irradiance_volume_descriptor: IrradianceVolumeDescriptor {
+                    meta: irradiance_volume.meta.clone(),
+                    transform: irradiance_volume_transform,
+                },
+                irradiance_volume_texture: Some(irradiance_volume.image.clone()),
+            });
+            continue 'outer;
             //}
         }
 
