@@ -18,9 +18,9 @@ use bevy_baked_gi::irradiance_volumes::{
 };
 use bevy_baked_gi::reflection_probes::ReflectionProbe;
 use blend::{Blend, Instance};
-use byteorder::{LittleEndian, WriteBytesExt};
+use byteorder::{ByteOrder as _, LittleEndian, WriteBytesExt};
 use clap::{Parser, ValueEnum};
-use glam::{ivec2, vec4, IVec2, IVec3, Mat4, Vec3, Vec3Swizzles, Vec4};
+use glam::{ivec2, ivec3, vec4, IVec2, IVec3, Mat4, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use ibllib_bindings::{
     IBLLib_OutputFormat_B9G9R9E5_UFLOAT, IBLLib_OutputFormat_R16G16B16A16_SFLOAT,
     IBLLib_OutputFormat_R32G32B32A32_SFLOAT, IBLLib_OutputFormat_R8G8B8A8_UNORM,
@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::fs::{self, File};
-use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -50,6 +50,9 @@ const IRRADIANCE_GRID_SAMPLES_PER_CELL: usize = 6;
 
 const SAMPLE_COUNT: u32 = 1024;
 const LOD_BIAS: f32 = 0.0;
+
+const IRRADIANCE_VOXELS_MAGIC_NUMBER: &[u8; 4] = b"VXGI";
+const IRRADIANCE_VOXELS_VERSION: u32 = 0;
 
 static BEVY_AXES_TO_BLENDER_AXES: Mat4 = Mat4::from_cols(
     vec4(1.0, 0.0, 0.0, 0.0),
@@ -141,9 +144,8 @@ struct UpstreamBevyIrradianceVolume {
     /// The size of the voxel grid, in voxels.
     pub resolution: IVec3,
 
-    /// The voxel grid data, stored as 32-bit floating point RGBA.
-    /// TODO(pcwalton): Switch to RGB9e5.
-    pub data: Vec<Vec4>,
+    /// The voxel grid data, stored as RGB9e5.
+    pub data: Vec<u32>,
 }
 
 fn main() {
@@ -351,6 +353,8 @@ fn extract_irradiance_volumes(
             }
         }
 
+        println!("transform={}", transform);
+
         // This path is assets-directory-relative.
         let irradiance_volume_path = if !using_upstream_types {
             update_irradiance_grid(
@@ -498,7 +502,7 @@ pub fn update_irradiance_grid(
         &mut output_file,
         &dest_grid_data,
         TextureFormat::R8G8B8A8Unorm,
-        ivec2(dest_width, dest_height as i32),
+        ivec3(dest_width, dest_height as i32, 0),
         1,
     )?;
 
@@ -523,46 +527,56 @@ pub fn update_irradiance_grid_upstream(
 ) -> AnyhowResult<PathBuf> {
     let sample_count = grid_sample_data.len() / IRRADIANCE_GRID_BYTES_PER_CELL;
 
-    let mut dest_grid_data = vec![Vec4::ZERO; sample_count * IRRADIANCE_GRID_SAMPLES_PER_CELL];
+    let mut dest_grid_data = vec![0; sample_count * IRRADIANCE_GRID_SAMPLES_PER_CELL * 4];
 
-    for src_cell_index in 0..sample_count {
-        let dest_start = src_cell_index * IRRADIANCE_GRID_SAMPLES_PER_CELL;
+    for z in 0..resolution.z {
+        for y in 0..resolution.y {
+            for x in 0..resolution.x {
+                for negative in 0..2 {
+                    for axis in 0..3 {
+                        // NB: Blender stores in (z, y, x) order, not (x, y, z).
+                        // See `lightprobe_lib.glsl` in Blender.
+                        let src_sample_index = negative as usize * 3
+                            + axis as usize
+                            + z as usize * IRRADIANCE_GRID_SAMPLES_PER_CELL
+                            + y as usize * resolution.z as usize * IRRADIANCE_GRID_SAMPLES_PER_CELL
+                            + x as usize
+                                * resolution.z as usize
+                                * resolution.y as usize
+                                * IRRADIANCE_GRID_SAMPLES_PER_CELL;
 
-        for negative in 0..2 {
-            for axis in 0..3 {
-                let dest_offset = axis * 2 + negative;
+                        let src_byte_offset = src_sample_index * IRRADIANCE_GRID_BYTES_PER_SAMPLE;
 
-                let src_sample_index = negative as usize * 3
-                    + axis as usize
-                    + src_cell_index * IRRADIANCE_GRID_SAMPLES_PER_CELL;
-                let src_byte_offset = src_sample_index * IRRADIANCE_GRID_BYTES_PER_SAMPLE;
+                        let texel = &grid_sample_data
+                            [src_byte_offset..(src_byte_offset + IRRADIANCE_GRID_BYTES_PER_SAMPLE)];
 
-                let texel = &grid_sample_data
-                    [src_byte_offset..(src_byte_offset + IRRADIANCE_GRID_BYTES_PER_SAMPLE)];
-
-                put_upstream_sample(
-                    &mut dest_grid_data,
-                    texel.try_into().unwrap(),
-                    dest_start + dest_offset,
-                );
+                        put_upstream_sample(
+                            &mut dest_grid_data,
+                            texel.try_into().unwrap(),
+                            ivec3(x, y, z),
+                            negative,
+                            axis,
+                            resolution,
+                        );
+                    }
+                }
             }
         }
     }
 
     let output_path = irradiance_volumes_dir.join(format!(
-        "{}.{:0>3}.voxelgi.bincode",
+        "{}.{:0>3}.vxgi.ktx2",
         filename.to_string_lossy(),
         irradiance_volume_index
     ));
-    let mut output_file = File::create(&output_path)?;
+    let mut output_file = BufWriter::new(File::create(&output_path)?);
 
-    bincode::serialize_into(
+    write_ktx2(
         &mut output_file,
-        &UpstreamBevyIrradianceVolume {
-            transform: *transform,
-            resolution,
-            data: dest_grid_data,
-        },
+        &dest_grid_data,
+        TextureFormat::B9G9R9E5Ufloat,
+        resolution * ivec3(1, 2, 3),
+        1,
     )?;
 
     let relative = assets_dir_relative(&output_path, assets_dir);
@@ -581,10 +595,36 @@ fn put_texel(buffer: &mut [u8], texel: [u8; 4], p: IVec2, stride: usize) {
     buffer[offset..offset + 4].copy_from_slice(&texel)
 }
 
-fn put_upstream_sample(buffer: &mut [Vec4], texel: [u8; 4], index: usize) {
+fn put_upstream_sample(
+    buffer: &mut [u8],
+    texel: [u8; 4],
+    pos: IVec3,
+    negative: u32,
+    axis: u32,
+    cube_dimensions: IVec3,
+) {
     let exponent = f32::exp2(texel[3] as f32 - 128.0);
     let rgb = Vec3::from_array(array::from_fn(|i| texel[i] as f32 / 255.0 * exponent));
-    buffer[index] = rgb.extend(1.0);
+
+    let initial_offset = upstream_buffer_index(pos, negative, axis, cube_dimensions) * 4;
+    LittleEndian::write_u32_into(
+        &[pack_rgb9e5(rgb)],
+        &mut buffer[initial_offset..(initial_offset + 4)],
+    );
+}
+
+fn upstream_buffer_index(
+    mut pos: IVec3,
+    negative: u32,
+    axis: u32,
+    cube_dimensions: IVec3,
+) -> usize {
+    let texture_dimensions = cube_dimensions * ivec3(1, 2, 3);
+    pos.y += negative as i32 * cube_dimensions.y;
+    pos.z += axis as i32 * cube_dimensions.z;
+    pos.x as usize
+        + texture_dimensions.x as usize * pos.y as usize
+        + texture_dimensions.x as usize * texture_dimensions.y as usize * pos.z as usize
 }
 
 fn div_ceil(a: u32, b: u32) -> u32 {
@@ -595,7 +635,7 @@ pub(crate) fn write_ktx2<F>(
     output: &mut F,
     texture_data: &[u8],
     texture_format: TextureFormat,
-    dimensions: IVec2,
+    dimensions: IVec3,
     face_count: u32,
 ) -> AnyhowResult<()>
 where
@@ -610,7 +650,7 @@ where
         texture_format.type_size(), // typeSize
         dimensions.x as u32,        // pixelWidth
         dimensions.y as u32,        // pixelHeight
-        0,                          // pixelDepth
+        dimensions.z as u32,        // pixelDepth
         0,                          // layerCount
         face_count,                 // faceCount
         1,                          // levelCount
@@ -684,7 +724,7 @@ impl TextureFormat {
         match self {
             TextureFormat::R32G32B32A32Sfloat => 4,
             TextureFormat::R16G16B16A16Sfloat => todo!(),
-            TextureFormat::B9G9R9E5Ufloat => todo!(),
+            TextureFormat::B9G9R9E5Ufloat => 4,
             TextureFormat::R8G8B8A8Unorm => 1,
         }
     }
@@ -750,4 +790,33 @@ fn decompress_blender_file(mut blend_file: File) -> Vec<u8> {
         blend_data.len()
     );
     blend_data
+}
+
+// https://registry.khronos.org/OpenGL/extensions/EXT/EXT_texture_shared_exponent.txt
+fn pack_rgb9e5(rgb: Vec3) -> u32 {
+    const N: f32 = 9.0;
+    const B: f32 = 15.0;
+    const SHARED_EXP_MAX: f32 = 65408.0;
+
+    let rgb_c = rgb.clamp(Vec3::splat(0.0), Vec3::splat(SHARED_EXP_MAX));
+    let max_c = rgb_c.max_element();
+
+    let exp_shared_p = max_c.log2().floor().max(-B - 1.0) + B + 1.0;
+
+    let max_s = (max_c / (2.0f32).powf(exp_shared_p - B - N) + 0.5).floor();
+
+    let exp_shared = if max_s < 512.0 {
+        exp_shared_p
+    } else {
+        exp_shared_p + 1.0
+    };
+    let exp_packed = exp_shared as u32;
+
+    let rgb_packed = (rgb_c / (2.0f32).powf(exp_shared - B - N) + 0.5)
+        .floor()
+        .as_uvec3();
+
+    let check = rgb_packed.as_vec3() * (2.0f32).powf((exp_packed as f32) - B - N);
+
+    rgb_packed.x | (rgb_packed.y << 9) | (rgb_packed.z << 18) | (exp_packed << 27)
 }

@@ -157,7 +157,7 @@ impl<'a> ReflectionProbeExtractor<'a> {
             &mut raw_cubemap,
             &output_data,
             TextureFormat::R32G32B32A32Sfloat,
-            cube_data.cube_dimensions,
+            cube_data.cube_dimensions.extend(0),
             6,
         )
         .unwrap();
@@ -210,7 +210,6 @@ impl<'a> ReflectionProbeExtractor<'a> {
                 CString::new(specular_output_path.to_str().unwrap()).unwrap();
             let lut_path = CString::new(lut_path.to_str().unwrap()).unwrap();
 
-            println!("diffuse size={:?}", self.diffuse_reflection_probe_size);
             let result = ibllib_bindings::IBLSample(
                 raw_cubemap_path.as_ptr(),
                 diffuse_output_path.as_ptr(),
