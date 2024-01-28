@@ -20,7 +20,7 @@ use bevy_baked_gi::reflection_probes::ReflectionProbe;
 use blend::{Blend, Instance};
 use byteorder::{ByteOrder as _, LittleEndian, WriteBytesExt};
 use clap::{Parser, ValueEnum};
-use glam::{ivec2, ivec3, vec4, IVec2, IVec3, Mat4, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
+use glam::{ivec2, ivec3, vec4, IVec2, IVec3, Mat4, Quat, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use ibllib_bindings::{
     IBLLib_OutputFormat_B9G9R9E5_UFLOAT, IBLLib_OutputFormat_R16G16B16A16_SFLOAT,
     IBLLib_OutputFormat_R32G32B32A32_SFLOAT, IBLLib_OutputFormat_R8G8B8A8_UNORM,
@@ -50,9 +50,6 @@ const IRRADIANCE_GRID_SAMPLES_PER_CELL: usize = 6;
 
 const SAMPLE_COUNT: u32 = 1024;
 const LOD_BIAS: f32 = 0.0;
-
-const IRRADIANCE_VOXELS_MAGIC_NUMBER: &[u8; 4] = b"VXGI";
-const IRRADIANCE_VOXELS_VERSION: u32 = 0;
 
 static BEVY_AXES_TO_BLENDER_AXES: Mat4 = Mat4::from_cols(
     vec4(1.0, 0.0, 0.0, 0.0),
@@ -308,13 +305,22 @@ fn extract_irradiance_volumes(
             continue;
         }
 
-        let transform = BEVY_AXES_TO_BLENDER_AXES
+        // For upstream, this is a 1x1x1 cube centered on the first voxel.
+        let mut transform = BEVY_AXES_TO_BLENDER_AXES
             * Mat4::from_cols(
                 Vec3::from_slice(&grid_data.get_f32_vec("increment_x")).extend(0.0),
                 Vec3::from_slice(&grid_data.get_f32_vec("increment_y")).extend(0.0),
                 Vec3::from_slice(&grid_data.get_f32_vec("increment_z")).extend(0.0),
                 Vec3::from_slice(&grid_data.get_f32_vec("corner")).extend(1.0),
             );
+
+        if using_upstream_types {
+            transform *= Mat4::from_scale_rotation_translation(
+                resolution.as_vec3() + 1.0,
+                Quat::IDENTITY,
+                (resolution.as_vec3() - 1.0) * 0.5,
+            );
+        }
 
         let meta = IrradianceVolumeMetadata {
             transform,
@@ -352,8 +358,6 @@ fn extract_irradiance_volumes(
                 ));
             }
         }
-
-        println!("transform={}", transform);
 
         // This path is assets-directory-relative.
         let irradiance_volume_path = if !using_upstream_types {
@@ -815,8 +819,6 @@ fn pack_rgb9e5(rgb: Vec3) -> u32 {
     let rgb_packed = (rgb_c / (2.0f32).powf(exp_shared - B - N) + 0.5)
         .floor()
         .as_uvec3();
-
-    let check = rgb_packed.as_vec3() * (2.0f32).powf((exp_packed as f32) - B - N);
 
     rgb_packed.x | (rgb_packed.y << 9) | (rgb_packed.z << 18) | (exp_packed << 27)
 }

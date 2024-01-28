@@ -145,6 +145,9 @@ pub struct GiPbrPipelineKey {
 
     /// Whether we have a reflection probe.
     pub has_reflection_probe: bool,
+
+    /// Whether we have an irradiance volume.
+    pub has_irradiance_volume: bool,
 }
 
 /// Settings that can be present in glTF files as glTF extras.
@@ -574,6 +577,7 @@ pub fn queue_gi_pbr_material_meshes(
                             },
                             diffuse_indirect_type,
                             has_reflection_probe: maybe_reflection_probe.is_some(),
+                            has_irradiance_volume: true,
                         },
                         &mesh.layout,
                     );
