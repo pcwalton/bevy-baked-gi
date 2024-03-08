@@ -22,16 +22,31 @@ convenient tool, `export-blender-gi`, that allows for the use of [Blender]
 
 ## Tooling
 
-The following tool may be useful for baking lightmaps.
+The following tools may be useful for baking global illumination.
 
-### `export-blender-gi`
+### The `export-blender-gi` CLI tool
 
 `bevy-baked-gi` comes with a command-line tool called `export-blender-gi` that
 you can apply to a Blender `.blend` file to convert baked irradiance volumes and
-reflection probes from Blender's native format into a native Bevy `.scn.ron`
+cube reflection probes from Blender's native format into a native Bevy `.scn.ron`
 asset. For cubemap reflection probes, the tool uses a [fork] of the [glTF IBL
 Sampler] to preprocess the cubemap images into diffuse and specular parts, so
 they can be used just as environment maps are used in Bevy.
+
+Note that you must bake the light probes before the tool is able to export them.
+In the Eevee renderer, use the button "Render → Indirect Lighting → Bake
+Indirect Lighting".
+
+### The "Bevy Global Illumination Export" Blender add-on
+
+An artist-friendly UI wrapping the above `export-blender-gi` tool is available
+as a Blender add-on. To install it, navigate to "Preferences → Add-ons →
+Install…" and open the `BlenderAddons/export-bevy-gi/export-bevy-gi.py` script.
+In the add-on preferences, locate the pre-built `export-blender-gi` or
+`export-blender-gi.exe`. You can then export baked irradiance volumes and cube
+reflection probes with the "File → Export → Bevy Global Illumination (.scn.ron)"
+menu item. You'll need to bake the light probes (in Eevee, "Render → Indirect
+Lighting → Bake Indirect Lighting") and save the `.blend` file first.
 
 ### glTF Unity Lightmapper
 

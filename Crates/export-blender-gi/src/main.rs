@@ -13,6 +13,7 @@ use bevy::prelude::{
     SpatialBundle, Transform, World,
 };
 use bevy::reflect::ReflectSerialize;
+use bevy::render::deterministic::DeterministicRenderingConfig;
 use bevy::render::view::ViewPlugin;
 use bevy::scene::DynamicScene;
 use bevy::MinimalPlugins;
@@ -30,15 +31,16 @@ use ruzstd::frame::ReadFrameHeaderError;
 use ruzstd::frame_decoder::FrameDecoderError;
 use ruzstd::{BlockDecodingStrategy, FrameDecoder};
 use serde::{Deserialize, Serialize};
-use std::array;
 use std::env;
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::fs::{self, File};
 use std::io::{BufWriter, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::mem;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::{array, panic};
 use vk2dfd::VkFormat;
 
 #[allow(non_upper_case_globals, non_camel_case_types, unused)]
@@ -144,6 +146,9 @@ struct UpstreamBevyIrradianceVolume {
 }
 
 fn main() {
+    color_backtrace::install();
+    pretty_env_logger::init();
+
     let args = Args::parse();
 
     let asset_path = args.assets_dir().to_string_lossy().into_owned();
@@ -161,6 +166,7 @@ fn main() {
         .add_plugins(ViewPlugin)
         .add_plugins(ImagePlugin::default())
         .insert_resource(args)
+        .init_resource::<DeterministicRenderingConfig>()
         .register_type::<Transform>()
         .register_type::<GlobalTransform>()
         .register_type_data::<Transform, ReflectSerialize>()
@@ -191,30 +197,46 @@ fn go(
         .next()
         .unwrap_or_else(|| die("The Blender file didn't find a scene."));
     let eevee = blender_scene.get("eevee");
-    let light_cache_data = eevee.get("light_cache_data");
 
     let mut world = World::new();
     world.insert_resource((*type_registry).clone());
 
-    extract_irradiance_volumes(
-        &mut world,
-        &mut asset_server,
-        &light_cache_data,
-        &args.irradiance_volumes_dir(),
-        &assets_dir,
-        filename,
-    );
+    // Fetching `light_cache_data` can panic, and I don't see another API. So we
+    // have to catch the panic.
 
-    ReflectionProbeExtractor {
-        light_cache_data: &light_cache_data,
-        reflection_probes_dir: &args.reflection_probes_dir(),
-        assets_dir: &assets_dir,
-        filename,
-        reflection_probe_format: args.reflection_probe_format,
-        diffuse_reflection_probe_mipmap_count: args.diffuse_reflection_probe_mipmap_count,
-        diffuse_reflection_probe_size: args.diffuse_reflection_probe_size,
+    let old_panic_hook = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+
+    let light_cache_data = panic::catch_unwind(move || eevee.get("light_cache_data"));
+
+    panic::set_hook(old_panic_hook);
+
+    match light_cache_data {
+        Err(_) => {
+            info!("No light probes found.")
+        }
+        Ok(light_cache_data) => {
+            extract_irradiance_volumes(
+                &mut world,
+                &mut asset_server,
+                &light_cache_data,
+                &args.irradiance_volumes_dir(),
+                &assets_dir,
+                filename,
+            );
+
+            ReflectionProbeExtractor {
+                light_cache_data: &light_cache_data,
+                reflection_probes_dir: &args.reflection_probes_dir(),
+                assets_dir: &assets_dir,
+                filename,
+                reflection_probe_format: args.reflection_probe_format,
+                diffuse_reflection_probe_mipmap_count: args.diffuse_reflection_probe_mipmap_count,
+                diffuse_reflection_probe_size: args.diffuse_reflection_probe_size,
+            }
+            .extract_reflection_probes(&mut world, &mut asset_server);
+        }
     }
-    .extract_reflection_probes(&mut world, &mut asset_server);
 
     // Write scene.
     let bevy_scene = DynamicScene::from_world(&world);
