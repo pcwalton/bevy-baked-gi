@@ -4,23 +4,22 @@
 
 use anyhow::Result as AnyhowResult;
 use bevy::app::AppExit;
+use bevy::asset::AssetApp as _;
+use bevy::pbr::irradiance_volume::IrradianceVolume;
+use bevy::pbr::LightProbe;
 use bevy::prelude::{
-    info, AddAsset, App, AppTypeRegistry, AssetPlugin, AssetServer, ComputedVisibility,
-    EventWriter, GlobalTransform, Handle, ImagePlugin, Mesh, PostStartup, Res, ResMut, Resource,
-    Shader, SpatialBundle, Transform, World,
+    info, App, AppTypeRegistry, AssetPlugin, AssetServer, EventWriter, GlobalTransform,
+    ImagePlugin, InheritedVisibility, Mesh, PostStartup, Res, ResMut, Resource, Shader,
+    SpatialBundle, Transform, World,
 };
-use bevy::reflect::{ReflectSerialize, TypePath, TypeUuid};
+use bevy::reflect::ReflectSerialize;
 use bevy::render::view::ViewPlugin;
 use bevy::scene::DynamicScene;
 use bevy::MinimalPlugins;
-use bevy_baked_gi::irradiance_volumes::{
-    IrradianceVolume, IrradianceVolumeMetadata, IRRADIANCE_GRID_BYTES_PER_CELL,
-};
-use bevy_baked_gi::reflection_probes::ReflectionProbe;
 use blend::{Blend, Instance};
 use byteorder::{ByteOrder as _, LittleEndian, WriteBytesExt};
 use clap::{Parser, ValueEnum};
-use glam::{ivec2, ivec3, vec4, IVec2, IVec3, Mat4, Quat, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
+use glam::{ivec2, ivec3, vec4, IVec2, IVec3, Mat4, Quat, Vec3, Vec3Swizzles};
 use ibllib_bindings::{
     IBLLib_OutputFormat_B9G9R9E5_UFLOAT, IBLLib_OutputFormat_R16G16B16A16_SFLOAT,
     IBLLib_OutputFormat_R32G32B32A32_SFLOAT, IBLLib_OutputFormat_R8G8B8A8_UNORM,
@@ -31,6 +30,8 @@ use ruzstd::frame::ReadFrameHeaderError;
 use ruzstd::frame_decoder::FrameDecoderError;
 use ruzstd::{BlockDecodingStrategy, FrameDecoder};
 use serde::{Deserialize, Serialize};
+use std::array;
+use std::env;
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::fs::{self, File};
@@ -38,7 +39,6 @@ use std::io::{BufWriter, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::{array, env};
 use vk2dfd::VkFormat;
 
 #[allow(non_upper_case_globals, non_camel_case_types, unused)]
@@ -47,6 +47,8 @@ mod reflection_probes;
 
 const IRRADIANCE_GRID_BYTES_PER_SAMPLE: usize = 4;
 const IRRADIANCE_GRID_SAMPLES_PER_CELL: usize = 6;
+const IRRADIANCE_GRID_BYTES_PER_CELL: usize =
+    IRRADIANCE_GRID_BYTES_PER_SAMPLE * IRRADIANCE_GRID_SAMPLES_PER_CELL;
 
 const SAMPLE_COUNT: u32 = 1024;
 const LOD_BIAS: f32 = 0.0;
@@ -108,10 +110,6 @@ struct Args {
     /// It may be desirable to store them at low res because they're blurry.
     #[arg(long)]
     diffuse_reflection_probe_size: Option<u32>,
-
-    /// Uses proposed upstream Bevy types where possible.
-    #[arg(short, long)]
-    upstream: bool,
 }
 
 struct CubemapPaths {
@@ -148,23 +146,23 @@ struct UpstreamBevyIrradianceVolume {
 fn main() {
     let args = Args::parse();
 
+    let asset_path = args.assets_dir().to_string_lossy().into_owned();
+
     let mut bevy_app = App::new();
     bevy_app
         .add_plugins(MinimalPlugins)
         .add_plugins(AssetPlugin {
-            asset_folder: args.assets_dir().to_string_lossy().into_owned(),
-            watch_for_changes: None,
+            processed_file_path: asset_path.clone(),
+            file_path: asset_path,
+            ..AssetPlugin::default()
         })
-        .add_asset::<Shader>()
-        .add_asset::<Mesh>()
+        .init_asset::<Shader>()
+        .init_asset::<Mesh>()
         .add_plugins(ViewPlugin)
         .add_plugins(ImagePlugin::default())
-        .add_asset::<IrradianceVolume>()
         .insert_resource(args)
         .register_type::<Transform>()
         .register_type::<GlobalTransform>()
-        .register_type::<ReflectionProbe>()
-        .register_type::<IrradianceVolume>()
         .register_type_data::<Transform, ReflectSerialize>()
         .add_systems(PostStartup, go);
 
@@ -205,7 +203,6 @@ fn go(
         &args.irradiance_volumes_dir(),
         &assets_dir,
         filename,
-        args.upstream,
     );
 
     ReflectionProbeExtractor {
@@ -287,7 +284,6 @@ fn extract_irradiance_volumes(
     irradiance_volumes_dir: &Path,
     assets_dir: &Path,
     filename: &OsStr,
-    using_upstream_types: bool,
 ) {
     let grid_texture = light_cache_data.get("grid_tx");
     let grid_texture_data = grid_texture.get_u8_vec("data");
@@ -314,26 +310,19 @@ fn extract_irradiance_volumes(
                 Vec3::from_slice(&grid_data.get_f32_vec("corner")).extend(1.0),
             );
 
-        if using_upstream_types {
-            transform *= Mat4::from_scale_rotation_translation(
-                resolution.as_vec3() + 1.0,
-                Quat::IDENTITY,
-                (resolution.as_vec3() - 1.0) * 0.5,
-            );
-        }
-
-        let meta = IrradianceVolumeMetadata {
-            transform,
-            inverse_transform: transform.inverse(),
-            resolution,
-        };
+        transform *= Mat4::from_scale_rotation_translation(
+            resolution.as_vec3() + 1.0,
+            Quat::IDENTITY,
+            (resolution.as_vec3() - 1.0) * 0.5,
+        );
 
         let offset = grid_data.get_i32("offset");
 
         // Extract the relevant portion of the first layer of the texture. (The rest of the texture
         // contains shadow maps used for visibility, which we don't care about presently.)
 
-        let sample_count: usize = meta.sample_count();
+        let sample_count: usize =
+            resolution.x as usize * resolution.y as usize * resolution.z as usize;
         let mut grid_sample_data =
             Vec::with_capacity(sample_count * IRRADIANCE_GRID_BYTES_PER_CELL);
         for sample_index in 0..(sample_count as i32) {
@@ -360,50 +349,39 @@ fn extract_irradiance_volumes(
         }
 
         // This path is assets-directory-relative.
-        let irradiance_volume_path = if !using_upstream_types {
-            update_irradiance_grid(
-                &grid_sample_data,
-                irradiance_volumes_dir,
-                assets_dir,
-                filename,
-                irradiance_volume_index,
-            )
-            .unwrap_or_else(|err| die(format!("{:?}", err)))
-        } else {
-            update_irradiance_grid_upstream(
-                &grid_sample_data,
-                irradiance_volumes_dir,
-                assets_dir,
-                filename,
-                irradiance_volume_index,
-                &Transform::from_matrix(transform),
-                resolution,
-            )
-            .unwrap_or_else(|err| die(format!("{:?}", err)))
-        };
+        let irradiance_volume_path = update_irradiance_grid_upstream(
+            &grid_sample_data,
+            irradiance_volumes_dir,
+            assets_dir,
+            filename,
+            irradiance_volume_index,
+            resolution,
+        )
+        .unwrap_or_else(|err| die(format!("{:?}", err)));
 
         println!(
             "Saving irradiance volume to {}",
             irradiance_volume_path.display()
         );
 
-        let irradiance_volume_image = load_asset(&irradiance_volume_path, asset_server);
+        let irradiance_volume_image = asset_server.load(irradiance_volume_path);
 
         let irradiance_volume = IrradianceVolume {
-            meta,
-            image: irradiance_volume_image,
+            intensity: 1.0,
+            voxels: irradiance_volume_image,
         };
 
-        let matrix = Mat4::from_cols_slice(&grid_data.get_f32_vec("mat"));
-        let transform = to_transform_matrix(&matrix);
+        // TODO(pcwalton): Try importing the matrix with
+        // `Mat4::from_cols_slice(&grid_data.get_f32_vec("mat"))`?
 
         world
             .spawn(irradiance_volume)
+            .insert(LightProbe)
             .insert(SpatialBundle {
-                transform,
+                transform: Transform::from_matrix(transform),
                 ..SpatialBundle::default()
             })
-            .remove::<ComputedVisibility>();
+            .remove::<InheritedVisibility>();
     }
 }
 
@@ -429,16 +407,6 @@ path instead",
     );
 
     fs::canonicalize(path).unwrap()
-}
-
-pub(crate) fn load_asset<T>(
-    asset_dir_relative_path: &Path,
-    asset_server: &mut AssetServer,
-) -> Handle<T>
-where
-    T: TypePath + TypeUuid + Send + Sync,
-{
-    asset_server.load::<T, _>(asset_dir_relative_path)
 }
 
 fn to_transform_matrix(matrix: &Mat4) -> Transform {
@@ -526,7 +494,6 @@ pub fn update_irradiance_grid_upstream(
     assets_dir: &Path,
     filename: &OsStr,
     irradiance_volume_index: usize,
-    transform: &Transform,
     resolution: IVec3,
 ) -> AnyhowResult<PathBuf> {
     let sample_count = grid_sample_data.len() / IRRADIANCE_GRID_BYTES_PER_CELL;

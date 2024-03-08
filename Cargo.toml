@@ -1,6 +1,3 @@
 [workspace]
-members = [
-    "Crates/bevy-baked-gi",
-    "Crates/export-blender-gi",
-]
+members = ["Crates/export-blender-gi"]
 resolver = "2"

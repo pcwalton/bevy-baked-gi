@@ -1,7 +1,9 @@
 // bevy-baked-gi/Crates/export-blender-gi/src/cubemap.rs
 
-use bevy::prelude::{AssetServer, ComputedVisibility, SpatialBundle, World};
-use bevy_baked_gi::reflection_probes::ReflectionProbe;
+use bevy::pbr::environment_map::EnvironmentMapLight;
+use bevy::pbr::LightProbe;
+use bevy::prelude::{AssetServer, SpatialBundle, World};
+use bevy::render::view::InheritedVisibility;
 use blend::Instance;
 use byteorder::{ByteOrder, LittleEndian};
 use glam::{uvec2, vec3, IVec2, IVec3, Mat4, UVec2, Vec3, Vec3Swizzles};
@@ -169,19 +171,21 @@ impl<'a> ReflectionProbeExtractor<'a> {
         let cubemap_paths =
             self.sample_cubemap(cube_data.cubemap_index, height, raw_cubemap_path, lut_path);
 
-        let diffuse_map = crate::load_asset(&cubemap_paths.diffuse, asset_server);
-        let specular_map = crate::load_asset(&cubemap_paths.specular, asset_server);
+        let diffuse_map = asset_server.load(cubemap_paths.diffuse);
+        let specular_map = asset_server.load(cubemap_paths.specular);
 
         world
-            .spawn(ReflectionProbe {
+            .spawn(EnvironmentMapLight {
                 diffuse_map,
                 specular_map,
+                intensity: 1.0,
             })
+            .insert(LightProbe)
             .insert(SpatialBundle {
                 transform,
                 ..SpatialBundle::default()
             })
-            .remove::<ComputedVisibility>();
+            .remove::<InheritedVisibility>();
     }
 
     fn sample_cubemap(
